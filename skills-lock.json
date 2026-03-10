@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "blaxel": {
+      "source": "blaxel-ai/agent-skills",
+      "sourceType": "github",
+      "computedHash": "55749825205361eb2fc49c6a168ae48c896b6affe431fdfb3688cd197b9d7b64"
+    }
+  }
+}
