@@ -1938,6 +1938,7 @@ function LabelEditor({
 
 function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string; onRefresh: () => void }) {
   const [action, setAction] = useState<"request_changes" | "merge" | "close" | null>(null);
+  const [mergeMethod, setMergeMethod] = useState<"squash" | "merge" | "rebase">("squash");
   const [body, setBody] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1966,7 +1967,7 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
         await submitReview(token, pr.repo, pr.number, "REQUEST_CHANGES", body);
         setSuccess("Changes requested!");
       } else if (action === "merge") {
-        await mergePR(token, pr.repo, pr.number, "squash");
+        await mergePR(token, pr.repo, pr.number, mergeMethod);
         setSuccess("Merged!");
       } else if (action === "close") {
         if (body.trim()) {
@@ -2017,7 +2018,7 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
           }>
             <MergeIcon /> Merge
           </TooltipTrigger>
-          <TooltipContent>Squash and merge</TooltipContent>
+          <TooltipContent>Merge this PR</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger render={
@@ -2046,7 +2047,16 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
       )}
       {action === "merge" && (
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={doSubmit} disabled={loading} className="text-xs">{loading ? "Merging..." : "Confirm squash merge"}</Button>
+          <select
+            value={mergeMethod}
+            onChange={(e) => setMergeMethod(e.target.value as "squash" | "merge" | "rebase")}
+            className="text-xs h-7 rounded border border-border bg-background px-1.5 outline-none"
+          >
+            <option value="squash">Squash and merge</option>
+            <option value="merge">Create a merge commit</option>
+            <option value="rebase">Rebase and merge</option>
+          </select>
+          <Button size="sm" onClick={doSubmit} disabled={loading} className="text-xs">{loading ? "Merging..." : "Confirm"}</Button>
           <Button variant="ghost" size="sm" onClick={() => setAction(null)} className="text-xs">Cancel</Button>
         </div>
       )}
