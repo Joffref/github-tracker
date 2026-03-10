@@ -82,10 +82,11 @@ function SearchIcon() {
   );
 }
 
-function RefreshIcon({ spinning = false }: { spinning?: boolean }) {
+function RefreshIcon({ spinning = false, rotations = 0 }: { spinning?: boolean; rotations?: number }) {
   return (
     <svg
       className={`w-4 h-4 ${spinning ? "animate-spin" : ""}`}
+      style={!spinning ? { transform: `rotate(${rotations * 360}deg)`, transition: "transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)" } : undefined}
       fill="none"
       viewBox="0 0 24 24"
       stroke="currentColor"
@@ -563,6 +564,11 @@ function Header({
   orgs,
   onOrgChange,
 }: HeaderProps) {
+  const [rotations, setRotations] = useState(0);
+  const handleRefresh = useCallback(() => {
+    setRotations((r) => r + 1);
+    onRefresh();
+  }, [onRefresh]);
   return (
     <header className="sticky top-0 z-10 bg-background/80 backdrop-blur-md border-b border-border animate-fade-in-down">
       <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
@@ -621,12 +627,12 @@ function Header({
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={onRefresh}
+                  onClick={handleRefresh}
                   disabled={loading}
                 />
               }
             >
-              <RefreshIcon spinning={loading} />
+              <RefreshIcon spinning={loading} rotations={rotations} />
             </TooltipTrigger>
             <TooltipContent>Refresh</TooltipContent>
           </Tooltip>
