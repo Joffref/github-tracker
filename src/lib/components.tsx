@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution } from "./github";
 import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
@@ -681,7 +681,8 @@ function FilterBar({
   const advancedFilterCount =
     (filters.label ? 1 : 0) +
     (filters.hideBots ? 1 : 0) +
-    (filters.hideOnDevelop ? 1 : 0);
+    (filters.hideOnDevelop ? 1 : 0) +
+    (filters.hasConflicts !== null ? 1 : 0);
 
   return (
     <div className="py-3 space-y-2">
@@ -832,6 +833,21 @@ function FilterBar({
             </label>
           </div>
 
+          {/* Conflicts filter */}
+          <Select
+            value={filters.hasConflicts === null ? "" : filters.hasConflicts ? "yes" : "no"}
+            onValueChange={(v) => setFilter("hasConflicts", v === "" ? null : v === "yes")}
+          >
+            <SelectTrigger size="sm" className={cn(filters.hasConflicts !== null && "border-orange-500/50 text-orange-500")}>
+              <SelectValue placeholder="Conflicts" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="">Any</SelectItem>
+              <SelectItem value="yes">Has conflicts</SelectItem>
+              <SelectItem value="no">No conflicts</SelectItem>
+            </SelectContent>
+          </Select>
+
           {/* Clear all */}
           {advancedFilterCount > 0 && (
             <Button
@@ -842,6 +858,7 @@ function FilterBar({
                 setFilter("label", null);
                 setFilter("hideBots", false);
                 setFilter("hideOnDevelop", false);
+                setFilter("hasConflicts", null);
               }}
             >
               Clear filters
@@ -894,9 +911,10 @@ function ReviewBadge({ state }: { state: ReviewState }) {
 // ── PR Card (list item) ────────────────────────────────────────────
 
 function accentColor(pr: DashboardPR): string {
-  if (pr.reviewState === "approved") return "border-l-emerald-500";
   if (pr.reviewState === "changes_requested") return "border-l-red-500";
   if (pr.ciStatus === "failure") return "border-l-red-500";
+  if (pr.hasConflicts) return "border-l-orange-500";
+  if (pr.reviewState === "approved") return "border-l-emerald-500";
   if (pr.ciStatus === "pending") return "border-l-amber-400";
   if (pr.reviewState === "review_required") return "border-l-amber-400";
   return "border-l-transparent";
@@ -1074,6 +1092,7 @@ function PRCard({ pr, selected, seen, onSelect, onToggleSeen, batchMode, batchSe
               <span className="text-[11px] text-muted-foreground shrink-0 truncate max-w-[120px]">{pr.author}</span>
               <PRAgeIndicator createdAt={pr.createdAt} />
               {pr.isDraft && <Badge variant="secondary" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto shrink-0">Draft</Badge>}
+              {pr.hasConflicts && <Badge variant="outline" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto shrink-0 gap-0.5 text-orange-500 border-orange-500/30"><AlertIcon /> Conflicts</Badge>}
               {pr.onDevelop === "yes" && <Badge variant="outline" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto text-emerald-500 border-emerald-500/30 shrink-0">On develop</Badge>}
               {(pr.additions > 0 || pr.deletions > 0) && (
                 <span className="text-[10px] font-mono text-muted-foreground shrink-0">
@@ -1708,22 +1727,101 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
 
 // ── Conflict File View ────────────────────────────────────────────
 
+// Compute LCS-based diff hunks between two line arrays
+function computeDiffHunks(baseLines: string[], headLines: string[], contextLines = 3) {
+  // Myers-like LCS to find matching lines
+  const n = baseLines.length;
+  const m = headLines.length;
+
+  // Build LCS table (optimized for typical file sizes)
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = baseLines[i] === headLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  // Trace through to produce diff operations
+  type DiffOp = { type: "equal"; baseLine: number; headLine: number; text: string }
+    | { type: "delete"; baseLine: number; text: string }
+    | { type: "insert"; headLine: number; text: string };
+
+  const ops: DiffOp[] = [];
+  let i = 0, j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && baseLines[i] === headLines[j]) {
+      ops.push({ type: "equal", baseLine: i, headLine: j, text: baseLines[i] });
+      i++; j++;
+    } else if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) {
+      ops.push({ type: "insert", headLine: j, text: headLines[j] });
+      j++;
+    } else {
+      ops.push({ type: "delete", baseLine: i, text: baseLines[i] });
+      i++;
+    }
+  }
+
+  // Group into hunks with context
+  type Hunk = { ops: DiffOp[]; baseStart: number; headStart: number };
+  const hunks: Hunk[] = [];
+  const changedIndices = ops.map((op, idx) => op.type !== "equal" ? idx : -1).filter(idx => idx >= 0);
+  if (changedIndices.length === 0) return [];
+
+  let hunkStart = Math.max(0, changedIndices[0] - contextLines);
+  let hunkEnd = Math.min(ops.length - 1, changedIndices[0] + contextLines);
+
+  for (let c = 1; c < changedIndices.length; c++) {
+    const nextStart = Math.max(0, changedIndices[c] - contextLines);
+    const nextEnd = Math.min(ops.length - 1, changedIndices[c] + contextLines);
+    if (nextStart <= hunkEnd + 1) {
+      // Merge overlapping hunks
+      hunkEnd = nextEnd;
+    } else {
+      // Emit previous hunk
+      const hunkOps = ops.slice(hunkStart, hunkEnd + 1);
+      const firstOp = hunkOps[0];
+      hunks.push({
+        ops: hunkOps,
+        baseStart: firstOp.type === "insert" ? (firstOp.headLine) : (firstOp as any).baseLine,
+        headStart: firstOp.type === "delete" ? (firstOp as any).baseLine : (firstOp as any).headLine ?? 0,
+      });
+      hunkStart = nextStart;
+      hunkEnd = nextEnd;
+    }
+  }
+  // Emit last hunk
+  const lastHunkOps = ops.slice(hunkStart, hunkEnd + 1);
+  const firstOp = lastHunkOps[0];
+  hunks.push({
+    ops: lastHunkOps,
+    baseStart: firstOp.type === "insert" ? 0 : (firstOp as any).baseLine,
+    headStart: firstOp.type === "delete" ? 0 : (firstOp as any).headLine ?? 0,
+  });
+
+  return hunks;
+}
+
 function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; baseRef: string; headRef: string }) {
   const [collapsed, setCollapsed] = useState(false);
-  const [view, setView] = useState<"side-by-side" | "base" | "head">("side-by-side");
+  const [view, setView] = useState<"unified" | "side-by-side">("unified");
 
   const baseLines = file.baseContent.split("\n");
   const headLines = file.headContent.split("\n");
-  const maxLines = Math.max(baseLines.length, headLines.length);
 
-  // Simple line-by-line diff: find lines that differ
-  const diffLines = Array.from({ length: maxLines }, (_, i) => ({
-    base: baseLines[i] ?? "",
-    head: headLines[i] ?? "",
-    differs: (baseLines[i] ?? "") !== (headLines[i] ?? ""),
-    baseExists: i < baseLines.length,
-    headExists: i < headLines.length,
-  }));
+  const hunks = useMemo(() => computeDiffHunks(baseLines, headLines), [file.baseContent, file.headContent]);
+
+  const changeStats = useMemo(() => {
+    let additions = 0, deletions = 0;
+    for (const hunk of hunks) {
+      for (const op of hunk.ops) {
+        if (op.type === "insert") additions++;
+        if (op.type === "delete") deletions++;
+      }
+    }
+    return { additions, deletions };
+  }, [hunks]);
 
   return (
     <div className="border border-border rounded-lg overflow-hidden">
@@ -1732,10 +1830,14 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
           <ChevronIcon open={!collapsed} />
           <AlertIcon />
           <span className="truncate">{file.filename}</span>
+          <span className="text-[10px] font-mono ml-2 flex gap-1.5">
+            <span className="text-green-500">+{changeStats.additions}</span>
+            <span className="text-red-500">-{changeStats.deletions}</span>
+          </span>
         </Button>
         {!collapsed && (
           <div className="flex items-center gap-0.5 mr-2 bg-background rounded-md p-0.5">
-            {([["side-by-side", "Split"], ["base", baseRef], ["head", headRef]] as const).map(([v, label]) => (
+            {([["unified", "Unified"], ["side-by-side", "Split"]] as const).map(([v, label]) => (
               <Button
                 key={v}
                 variant={view === v ? "secondary" : "ghost"}
@@ -1752,25 +1854,69 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
 
       {!collapsed && (
         <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-          {view === "side-by-side" ? (
+          {hunks.length === 0 ? (
+            <div className="px-3 py-4 text-xs text-muted-foreground italic">Files are identical — conflict may be whitespace or encoding only.</div>
+          ) : view === "unified" ? (
+            <pre className="text-[11px] font-mono leading-[1.7]">
+              {hunks.map((hunk, hi) => (
+                <div key={hi}>
+                  {hi > 0 && (
+                    <div className="px-2 py-1 bg-muted/50 text-muted-foreground text-[10px] border-y border-border/30 select-none">⋯</div>
+                  )}
+                  {hunk.ops.map((op, oi) => {
+                    if (op.type === "equal") {
+                      return (
+                        <div key={oi} className="px-2 flex">
+                          <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{op.baseLine + 1}</span>
+                          <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{op.headLine + 1}</span>
+                          <span className="w-4 text-center text-muted-foreground select-none shrink-0"> </span>
+                          <span className="flex-1 whitespace-pre-wrap break-all text-foreground">{op.text}</span>
+                        </div>
+                      );
+                    }
+                    if (op.type === "delete") {
+                      return (
+                        <div key={oi} className="px-2 flex bg-red-500/10">
+                          <span className="w-8 text-right pr-2 text-red-400/70 select-none shrink-0">{op.baseLine + 1}</span>
+                          <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0" />
+                          <span className="w-4 text-center text-red-500 select-none shrink-0 font-bold">−</span>
+                          <span className="flex-1 whitespace-pre-wrap break-all text-red-600 dark:text-red-400">{op.text}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={oi} className="px-2 flex bg-emerald-500/10">
+                        <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0" />
+                        <span className="w-8 text-right pr-2 text-emerald-400/70 select-none shrink-0">{op.headLine + 1}</span>
+                        <span className="w-4 text-center text-emerald-500 select-none shrink-0 font-bold">+</span>
+                        <span className="flex-1 whitespace-pre-wrap break-all text-emerald-600 dark:text-emerald-400">{op.text}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </pre>
+          ) : (
             <div className="flex divide-x divide-border min-w-[600px]">
               {/* Base side */}
               <div className="flex-1 min-w-0">
                 <div className="bg-muted px-2 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border sticky top-0 z-10">{baseRef}</div>
                 <pre className="text-[11px] font-mono leading-[1.7]">
-                  {diffLines.map((line, i) => (
-                    <div
-                      key={i}
-                      className={cn(
-                        "px-2 flex",
-                        line.differs && line.baseExists ? "bg-red-500/10" : "",
-                        !line.baseExists ? "bg-muted/30" : ""
-                      )}
-                    >
-                      <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{line.baseExists ? i + 1 : ""}</span>
-                      <span className={cn("flex-1 whitespace-pre-wrap break-all", line.differs ? "text-red-600 dark:text-red-400" : "text-foreground")}>
-                        {line.baseExists ? line.base : ""}
-                      </span>
+                  {hunks.map((hunk, hi) => (
+                    <div key={hi}>
+                      {hi > 0 && <div className="px-2 py-1 bg-muted/50 text-muted-foreground text-[10px] border-y border-border/30 select-none">⋯</div>}
+                      {hunk.ops.map((op, oi) => {
+                        if (op.type === "insert") {
+                          return <div key={oi} className="px-2 flex bg-muted/20"><span className="w-8" /><span className="flex-1"> </span></div>;
+                        }
+                        const lineNum = op.type === "equal" ? op.baseLine : op.baseLine;
+                        return (
+                          <div key={oi} className={cn("px-2 flex", op.type === "delete" ? "bg-red-500/10" : "")}>
+                            <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{lineNum + 1}</span>
+                            <span className={cn("flex-1 whitespace-pre-wrap break-all", op.type === "delete" ? "text-red-600 dark:text-red-400" : "text-foreground")}>{op.text}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
                 </pre>
@@ -1779,33 +1925,26 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
               <div className="flex-1 min-w-0">
                 <div className="bg-muted px-2 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border sticky top-0 z-10">{headRef}</div>
                 <pre className="text-[11px] font-mono leading-[1.7]">
-                  {diffLines.map((line, i) => (
-                    <div
-                      key={i}
-                      className={cn(
-                        "px-2 flex",
-                        line.differs && line.headExists ? "bg-emerald-500/10" : "",
-                        !line.headExists ? "bg-muted/30" : ""
-                      )}
-                    >
-                      <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{line.headExists ? i + 1 : ""}</span>
-                      <span className={cn("flex-1 whitespace-pre-wrap break-all", line.differs ? "text-emerald-600 dark:text-emerald-400" : "text-foreground")}>
-                        {line.headExists ? line.head : ""}
-                      </span>
+                  {hunks.map((hunk, hi) => (
+                    <div key={hi}>
+                      {hi > 0 && <div className="px-2 py-1 bg-muted/50 text-muted-foreground text-[10px] border-y border-border/30 select-none">⋯</div>}
+                      {hunk.ops.map((op, oi) => {
+                        if (op.type === "delete") {
+                          return <div key={oi} className="px-2 flex bg-muted/20"><span className="w-8" /><span className="flex-1"> </span></div>;
+                        }
+                        const lineNum = op.type === "equal" ? op.headLine : op.headLine;
+                        return (
+                          <div key={oi} className={cn("px-2 flex", op.type === "insert" ? "bg-emerald-500/10" : "")}>
+                            <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{lineNum + 1}</span>
+                            <span className={cn("flex-1 whitespace-pre-wrap break-all", op.type === "insert" ? "text-emerald-600 dark:text-emerald-400" : "text-foreground")}>{op.text}</span>
+                          </div>
+                        );
+                      })}
                     </div>
                   ))}
                 </pre>
               </div>
             </div>
-          ) : (
-            <pre className="text-[11px] font-mono leading-[1.7]">
-              {(view === "base" ? baseLines : headLines).map((line, i) => (
-                <div key={i} className="px-2 flex">
-                  <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{i + 1}</span>
-                  <span className="flex-1 whitespace-pre-wrap break-all text-foreground">{line}</span>
-                </div>
-              ))}
-            </pre>
           )}
         </div>
       )}
@@ -2846,12 +2985,30 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
                     </div>
                   ) : conflictFiles && conflictFiles.length > 0 ? (
                     <>
-                      <div className="flex items-center gap-2 text-sm">
+                      <div className="flex items-center gap-2 text-sm flex-wrap">
                         <Badge variant="destructive" className="text-[10px]">{conflictFiles.length} conflicting file{conflictFiles.length > 1 ? "s" : ""}</Badge>
                         <span className="text-xs text-muted-foreground">
                           Files modified in both <code className="bg-muted px-1 py-0.5 rounded text-[11px] font-mono">{pr.baseRef}</code> and <code className="bg-muted px-1 py-0.5 rounded text-[11px] font-mono">{pr.headRef}</code>
                         </span>
                       </div>
+
+                      {/* Resolution guidance */}
+                      <div className="rounded-lg border border-orange-500/20 bg-orange-500/5 p-3 space-y-2">
+                        <p className="text-xs font-medium text-orange-600 dark:text-orange-400">To resolve these conflicts locally:</p>
+                        <div className="space-y-1">
+                          <button
+                            className="group flex items-center gap-2 w-full text-left"
+                            onClick={() => navigator.clipboard.writeText(`git fetch origin && git checkout ${pr.headRef} && git merge origin/${pr.baseRef}`)}
+                          >
+                            <code className="flex-1 text-[11px] font-mono bg-background/80 rounded px-2 py-1.5 border border-border/50 text-foreground">
+                              git fetch origin && git checkout {pr.headRef} && git merge origin/{pr.baseRef}
+                            </code>
+                            <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0">click to copy</span>
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">Resolve conflicts in your editor, then commit and push.</p>
+                      </div>
+
                       {conflictFiles.map((cf) => (
                         <ConflictFileView key={cf.filename} file={cf} baseRef={pr.baseRef} headRef={pr.headRef} />
                       ))}
