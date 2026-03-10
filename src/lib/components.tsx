@@ -1803,12 +1803,27 @@ function computeDiffHunks(baseLines: string[], headLines: string[], contextLines
   return hunks;
 }
 
+function highlightLines(content: string, lang: string | null): string[] {
+  const lines = content.split("\n");
+  if (!lang) return lines.map(escapeHtml);
+  try {
+    const highlighted = hljs.highlight(content, { language: lang }).value;
+    return highlighted.split("\n");
+  } catch {
+    return lines.map(escapeHtml);
+  }
+}
+
 function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; baseRef: string; headRef: string }) {
   const [collapsed, setCollapsed] = useState(false);
   const [view, setView] = useState<"unified" | "side-by-side">("unified");
 
+  const lang = langForFile(file.filename);
   const baseLines = file.baseContent.split("\n");
   const headLines = file.headContent.split("\n");
+
+  const baseHighlighted = useMemo(() => highlightLines(file.baseContent, lang), [file.baseContent, lang]);
+  const headHighlighted = useMemo(() => highlightLines(file.headContent, lang), [file.headContent, lang]);
 
   const hunks = useMemo(() => computeDiffHunks(baseLines, headLines), [file.baseContent, file.headContent]);
 
@@ -1870,7 +1885,7 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
                           <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{op.baseLine + 1}</span>
                           <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{op.headLine + 1}</span>
                           <span className="w-4 text-center text-muted-foreground select-none shrink-0"> </span>
-                          <span className="flex-1 whitespace-pre-wrap break-all text-foreground">{op.text}</span>
+                          <span className="flex-1 whitespace-pre-wrap break-all" dangerouslySetInnerHTML={{ __html: baseHighlighted[op.baseLine] ?? escapeHtml(op.text) }} />
                         </div>
                       );
                     }
@@ -1880,7 +1895,7 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
                           <span className="w-8 text-right pr-2 text-red-400/70 select-none shrink-0">{op.baseLine + 1}</span>
                           <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0" />
                           <span className="w-4 text-center text-red-500 select-none shrink-0 font-bold">−</span>
-                          <span className="flex-1 whitespace-pre-wrap break-all text-red-600 dark:text-red-400">{op.text}</span>
+                          <span className="flex-1 whitespace-pre-wrap break-all" dangerouslySetInnerHTML={{ __html: baseHighlighted[op.baseLine] ?? escapeHtml(op.text) }} />
                         </div>
                       );
                     }
@@ -1889,7 +1904,7 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
                         <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0" />
                         <span className="w-8 text-right pr-2 text-emerald-400/70 select-none shrink-0">{op.headLine + 1}</span>
                         <span className="w-4 text-center text-emerald-500 select-none shrink-0 font-bold">+</span>
-                        <span className="flex-1 whitespace-pre-wrap break-all text-emerald-600 dark:text-emerald-400">{op.text}</span>
+                        <span className="flex-1 whitespace-pre-wrap break-all" dangerouslySetInnerHTML={{ __html: headHighlighted[op.headLine] ?? escapeHtml(op.text) }} />
                       </div>
                     );
                   })}
@@ -1909,11 +1924,11 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
                         if (op.type === "insert") {
                           return <div key={oi} className="px-2 flex bg-muted/20"><span className="w-8" /><span className="flex-1"> </span></div>;
                         }
-                        const lineNum = op.type === "equal" ? op.baseLine : op.baseLine;
+                        const lineNum = op.baseLine;
                         return (
                           <div key={oi} className={cn("px-2 flex", op.type === "delete" ? "bg-red-500/10" : "")}>
                             <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{lineNum + 1}</span>
-                            <span className={cn("flex-1 whitespace-pre-wrap break-all", op.type === "delete" ? "text-red-600 dark:text-red-400" : "text-foreground")}>{op.text}</span>
+                            <span className={cn("flex-1 whitespace-pre-wrap break-all")} dangerouslySetInnerHTML={{ __html: baseHighlighted[lineNum] ?? escapeHtml(op.text) }} />
                           </div>
                         );
                       })}
@@ -1932,11 +1947,11 @@ function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; base
                         if (op.type === "delete") {
                           return <div key={oi} className="px-2 flex bg-muted/20"><span className="w-8" /><span className="flex-1"> </span></div>;
                         }
-                        const lineNum = op.type === "equal" ? op.headLine : op.headLine;
+                        const lineNum = op.headLine;
                         return (
                           <div key={oi} className={cn("px-2 flex", op.type === "insert" ? "bg-emerald-500/10" : "")}>
                             <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{lineNum + 1}</span>
-                            <span className={cn("flex-1 whitespace-pre-wrap break-all", op.type === "insert" ? "text-emerald-600 dark:text-emerald-400" : "text-foreground")}>{op.text}</span>
+                            <span className={cn("flex-1 whitespace-pre-wrap break-all")} dangerouslySetInnerHTML={{ __html: headHighlighted[lineNum] ?? escapeHtml(op.text) }} />
                           </div>
                         );
                       })}
