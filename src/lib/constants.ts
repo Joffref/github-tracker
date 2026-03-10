@@ -26,6 +26,9 @@ export function categorizePR(
   const isMine = pr.author.toLowerCase() === currentUser.toLowerCase();
   const reviewRequestedFromMe = pr.reviewRequestedFromMe;
 
+  // My PR that's been approved → no action needed
+  if (isMine && pr.reviewState === "approved") return "other";
+
   if (!isMine && reviewRequestedFromMe) return "needs_attention";
   if (isMine && pr.reviewState === "changes_requested") return "needs_attention";
   if (isMine && pr.ciStatus === "failure") return "needs_attention";
@@ -33,8 +36,6 @@ export function categorizePR(
 
   if (isMine && pr.reviewState === "review_required") return "waiting";
   if (isMine && pr.ciStatus === "pending") return "waiting";
-
-  if (!isMine && reviewRequestedFromMe) return "needs_attention";
 
   return "other";
 }

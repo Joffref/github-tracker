@@ -32,6 +32,12 @@ export interface DashboardPR {
   reviewers: Array<{ login: string; state: string; avatar: string }>;
   category: PRCategory;
   headSha: string;
+  baseRef: string;
+  headRef: string;
+  onDevelop: "yes" | "no" | "no-branch" | null;
+  additions: number;
+  deletions: number;
+  changedFiles: number;
 }
 
 export interface PRFile {
@@ -62,6 +68,28 @@ export interface ReviewComment {
   diff_hunk: string;
   in_reply_to_id?: number;
   pull_request_review_id: number | null;
+}
+
+export interface PRCommit {
+  sha: string;
+  commit: {
+    message: string;
+    author: { name: string; date: string };
+  };
+  author: { login: string; avatar_url: string } | null;
+  html_url: string;
+}
+
+export interface CheckRun {
+  id: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  html_url: string;
+  app: { name: string; slug: string } | null;
+  output: { title: string | null; summary: string | null };
 }
 
 export interface GitHubUser {
@@ -101,14 +129,17 @@ interface SearchResult {
 
 export async function fetchOpenPRs(
   token: string,
-  username: string
+  username: string,
+  org?: string | null
 ): Promise<DashboardPR[]> {
   const allItems: Array<Record<string, unknown>> = [];
   let page = 1;
   const perPage = 100;
 
   while (true) {
-    const q = encodeURIComponent(`type:pr state:open involves:${username}`);
+    let query = `type:pr state:open involves:${username}`;
+    if (org) query += ` org:${org}`;
+    const q = encodeURIComponent(query);
     const data = await ghFetch<SearchResult>(
       token,
       `/search/issues?q=${q}&per_page=${perPage}&page=${page}&sort=updated&order=desc`
@@ -119,6 +150,97 @@ export async function fetchOpenPRs(
   }
 
   return allItems.map((item) => mapSearchItemToPR(item, username));
+}
+
+// ── Daily Activity Tracking ────────────────────────────────────────
+
+export interface DailyActivity {
+  reviewsSubmitted: Array<{ repo: string; prNumber: number; prTitle: string; url: string; state: string; submittedAt: string }>;
+  commentsMade: Array<{ repo: string; prNumber: number; prTitle: string; url: string; commentedAt: string }>;
+  prsMerged: Array<{ repo: string; prNumber: number; prTitle: string; url: string; mergedAt: string }>;
+}
+
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export async function fetchDailyActivity(
+  token: string,
+  username: string,
+  org?: string | null
+): Promise<DailyActivity> {
+  const today = todayISO();
+  const orgFilter = org ? ` org:${org}` : "";
+
+  const [reviewedData, commentedData, mergedData] = await Promise.all([
+    // PRs I reviewed today
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr reviewed-by:${username} -author:${username} updated:>=${today}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+    // PRs I commented on today
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr commenter:${username} -author:${username} updated:>=${today}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+    // PRs merged today that I'm involved in (authored, reviewed, or merged)
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr involves:${username} is:merged merged:>=${today}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+  ]);
+
+  const mapItem = (item: Record<string, unknown>) => ({
+    repo: extractRepo(item.repository_url as string),
+    prNumber: item.number as number,
+    prTitle: item.title as string,
+    url: item.html_url as string,
+  });
+
+  // For merged PRs, fetch PR details to check who actually clicked merge
+  const mergedCandidates = mergedData.items.map(mapItem);
+  const mergedDetails = await Promise.all(
+    mergedCandidates.map(async (item) => {
+      try {
+        const pr = await ghFetch<Record<string, unknown>>(
+          token,
+          `/repos/${item.repo}/pulls/${item.prNumber}`
+        );
+        const mergedBy = (pr.merged_by as Record<string, unknown>)?.login as string | undefined;
+        return { ...item, mergedBy, mergedAt: pr.merged_at as string ?? "" };
+      } catch {
+        return { ...item, mergedBy: undefined, mergedAt: "" };
+      }
+    })
+  );
+
+  return {
+    reviewsSubmitted: reviewedData.items.map((item) => ({
+      ...mapItem(item),
+      state: "reviewed",
+      submittedAt: item.updated_at as string,
+    })),
+    commentsMade: commentedData.items.map((item) => ({
+      ...mapItem(item),
+      commentedAt: item.updated_at as string,
+    })),
+    prsMerged: mergedDetails
+      .filter((d) => d.mergedBy === username)
+      .map((d) => ({
+        repo: d.repo,
+        prNumber: d.prNumber,
+        prTitle: d.prTitle,
+        url: d.url,
+        mergedAt: d.mergedAt,
+      })),
+  };
+}
+
+export async function fetchUserOrgs(
+  token: string
+): Promise<Array<{ login: string; avatar_url: string }>> {
+  return ghFetch<Array<{ login: string; avatar_url: string }>>(token, "/user/orgs?per_page=100");
 }
 
 function extractRepo(repoUrl: string): string {
@@ -156,6 +278,12 @@ function mapSearchItemToPR(item: any, _username: string): DashboardPR {
     reviewers: [],
     category: "other",
     headSha: "",
+    baseRef: "",
+    headRef: "",
+    onDevelop: null,
+    additions: 0,
+    deletions: 0,
+    changedFiles: 0,
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -181,8 +309,12 @@ export async function enrichPRDetails(
     ghFetch<{
       mergeable: boolean | null;
       mergeable_state: string;
-      head: { sha: string };
+      head: { sha: string; ref: string };
+      base: { ref: string };
       requested_reviewers: Array<{ login: string }>;
+      additions: number;
+      deletions: number;
+      changed_files: number;
     }>(token, `/repos/${pr.repo}/pulls/${pr.number}`),
   ]);
 
@@ -192,10 +324,15 @@ export async function enrichPRDetails(
   if (prDetail.status === "fulfilled" && prDetail.value) {
     const d = prDetail.value;
     enriched.headSha = d.head.sha;
+    enriched.baseRef = d.base.ref;
+    enriched.headRef = d.head.ref;
     enriched.hasConflicts = d.mergeable === false && d.mergeable_state === "dirty";
     enriched.reviewRequestedFromMe = (d.requested_reviewers ?? []).some(
       (r) => r.login.toLowerCase() === username.toLowerCase()
     );
+    enriched.additions = d.additions ?? 0;
+    enriched.deletions = d.deletions ?? 0;
+    enriched.changedFiles = d.changed_files ?? 0;
   }
 
   // Reviews
@@ -216,14 +353,10 @@ export async function enrichPRDetails(
     enriched.reviewState = deriveReviewState(enriched.reviewers);
   }
 
-  // Checks — if we didn't have headSha initially, try again with the one from prDetail
-  if (checks.status === "fulfilled" && checks.value) {
+  // Checks — if we didn't have headSha initially, fetch with the one from prDetail
+  if (checks.status === "fulfilled" && checks.value && checks.value.check_runs) {
     enriched.ciStatus = deriveCIStatus(checks.value.check_runs);
-  } else if (
-    checks.status !== "fulfilled" &&
-    enriched.headSha &&
-    enriched.headSha !== pr.headSha
-  ) {
+  } else if (enriched.headSha) {
     try {
       const checksRetry = await ghFetch<{
         check_runs: Array<{ conclusion: string | null; status: string }>;
@@ -232,6 +365,11 @@ export async function enrichPRDetails(
     } catch {
       enriched.ciStatus = "unknown";
     }
+  }
+
+  // Check if already on develop
+  if (enriched.headSha) {
+    enriched.onDevelop = await checkOnDevelop(token, pr.repo, enriched.headSha);
   }
 
   return enriched;
@@ -270,12 +408,120 @@ function deriveCIStatus(
 
 // ── PR Detail fetchers ─────────────────────────────────────────────
 
+async function ghFetchAllPages<T>(token: string, path: string): Promise<T[]> {
+  const results: T[] = [];
+  let page = 1;
+  const sep = path.includes("?") ? "&" : "?";
+  while (true) {
+    const items = await ghFetch<T[]>(token, `${path}${sep}per_page=100&page=${page}`);
+    results.push(...items);
+    if (items.length < 100) break;
+    page++;
+  }
+  return results;
+}
+
 export async function fetchPRFiles(
   token: string,
   repo: string,
   number: number
 ): Promise<PRFile[]> {
-  return ghFetch<PRFile[]>(token, `/repos/${repo}/pulls/${number}/files`);
+  return ghFetchAllPages<PRFile>(token, `/repos/${repo}/pulls/${number}/files`);
+}
+
+export interface ReviewThreadInfo {
+  id: string; // GraphQL node ID
+  isResolved: boolean;
+  path: string;
+  line: number | null;
+  originalLine: number | null;
+}
+
+export interface ThreadResolution {
+  totalThreads: number;
+  resolvedThreads: number;
+  threads: ReviewThreadInfo[];
+}
+
+export async function fetchThreadResolutions(
+  token: string,
+  repo: string,
+  number: number
+): Promise<ThreadResolution> {
+  const [owner, name] = repo.split("/");
+  const query = `query($owner:String!,$name:String!,$number:Int!) {
+    repository(owner:$owner,name:$name) {
+      pullRequest(number:$number) {
+        reviewThreads(first:100) {
+          nodes {
+            id
+            isResolved
+            path
+            line
+            originalLine
+          }
+        }
+      }
+    }
+  }`;
+  try {
+    const data = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables: { owner, name, number } }),
+    }).then((r) => r.json());
+    const nodes = data?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+    const threads: ReviewThreadInfo[] = nodes.map((n: { id: string; isResolved: boolean; path: string; line: number | null; originalLine: number | null }) => ({
+      id: n.id,
+      isResolved: n.isResolved,
+      path: n.path,
+      line: n.line,
+      originalLine: n.originalLine,
+    }));
+    return {
+      totalThreads: threads.length,
+      resolvedThreads: threads.filter((t) => t.isResolved).length,
+      threads,
+    };
+  } catch {
+    return { totalThreads: 0, resolvedThreads: 0, threads: [] };
+  }
+}
+
+export async function resolveReviewThread(
+  token: string,
+  threadId: string
+): Promise<boolean> {
+  const mutation = `mutation($threadId:ID!) {
+    resolveReviewThread(input:{threadId:$threadId}) {
+      thread { isResolved }
+    }
+  }`;
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: mutation, variables: { threadId } }),
+  });
+  const data = await res.json();
+  return data?.data?.resolveReviewThread?.thread?.isResolved ?? false;
+}
+
+export async function unresolveReviewThread(
+  token: string,
+  threadId: string
+): Promise<boolean> {
+  const mutation = `mutation($threadId:ID!) {
+    unresolveReviewThread(input:{threadId:$threadId}) {
+      thread { isResolved }
+    }
+  }`;
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: mutation, variables: { threadId } }),
+  });
+  const data = await res.json();
+  return !(data?.data?.unresolveReviewThread?.thread?.isResolved ?? true);
 }
 
 export async function fetchIssueComments(
@@ -283,7 +529,7 @@ export async function fetchIssueComments(
   repo: string,
   number: number
 ): Promise<PRComment[]> {
-  return ghFetch<PRComment[]>(token, `/repos/${repo}/issues/${number}/comments`);
+  return ghFetchAllPages<PRComment>(token, `/repos/${repo}/issues/${number}/comments`);
 }
 
 export async function fetchReviewComments(
@@ -291,7 +537,71 @@ export async function fetchReviewComments(
   repo: string,
   number: number
 ): Promise<ReviewComment[]> {
-  return ghFetch<ReviewComment[]>(token, `/repos/${repo}/pulls/${number}/comments`);
+  return ghFetchAllPages<ReviewComment>(token, `/repos/${repo}/pulls/${number}/comments`);
+}
+
+export async function fetchPRCommits(
+  token: string,
+  repo: string,
+  number: number
+): Promise<PRCommit[]> {
+  return ghFetch<PRCommit[]>(token, `/repos/${repo}/pulls/${number}/commits?per_page=100`);
+}
+
+export async function fetchCheckRuns(
+  token: string,
+  repo: string,
+  headSha: string
+): Promise<CheckRun[]> {
+  const data = await ghFetch<{ total_count: number; check_runs: CheckRun[] }>(
+    token,
+    `/repos/${repo}/commits/${headSha}/check-runs?per_page=100`
+  );
+  return data.check_runs;
+}
+
+export async function rerunCheckRun(
+  token: string,
+  repo: string,
+  checkRunId: number
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/check-runs/${checkRunId}/rerequest`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function rerunFailedChecks(
+  token: string,
+  repo: string,
+  headSha: string
+): Promise<void> {
+  // Get the workflow runs for this commit and re-run failed ones
+  const data = await ghFetch<{ total_count: number; workflow_runs: Array<{ id: number; conclusion: string | null }> }>(
+    token,
+    `/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100`
+  );
+  const failedRuns = data.workflow_runs.filter((r) => r.conclusion === "failure" || r.conclusion === "timed_out");
+  await Promise.all(
+    failedRuns.map((run) =>
+      fetch(`${BASE}/repos/${repo}/actions/runs/${run.id}/rerun-failed-jobs`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      })
+    )
+  );
 }
 
 export async function postReviewComment(
@@ -367,6 +677,71 @@ export async function postComment(
   return res.json() as Promise<PRComment>;
 }
 
+// ── Conflict detection ────────────────────────────────────────────
+
+export interface ConflictFile {
+  filename: string;
+  baseContent: string;
+  headContent: string;
+}
+
+export async function fetchConflictFiles(
+  token: string,
+  repo: string,
+  number: number,
+  baseRef: string,
+  headRef: string
+): Promise<ConflictFile[]> {
+  // Get files changed in PR and files changed in base since merge-base
+  const [prFiles, compareData] = await Promise.allSettled([
+    ghFetch<Array<{ filename: string }>>(token, `/repos/${repo}/pulls/${number}/files?per_page=100`),
+    ghFetch<{ files: Array<{ filename: string }> }>(token, `/repos/${repo}/compare/${headRef}...${baseRef}`),
+  ]);
+
+  if (prFiles.status !== "fulfilled" || compareData.status !== "fulfilled") return [];
+
+  const prFileSet = new Set(prFiles.value.map((f) => f.filename));
+  const baseChangedFiles = compareData.value.files?.map((f) => f.filename) ?? [];
+  const conflicting = baseChangedFiles.filter((f) => prFileSet.has(f));
+
+  if (conflicting.length === 0) return [];
+
+  // Fetch content from both branches for conflicting files (limit to first 10)
+  const filesToFetch = conflicting.slice(0, 10);
+  const results = await Promise.allSettled(
+    filesToFetch.map(async (filename) => {
+      const [baseFile, headFile] = await Promise.allSettled([
+        ghFetch<{ content: string; encoding: string }>(
+          token,
+          `/repos/${repo}/contents/${encodeURIComponent(filename)}?ref=${baseRef}`
+        ),
+        ghFetch<{ content: string; encoding: string }>(
+          token,
+          `/repos/${repo}/contents/${encodeURIComponent(filename)}?ref=${headRef}`
+        ),
+      ]);
+
+      const decode = (r: PromiseSettledResult<{ content: string; encoding: string }>) => {
+        if (r.status !== "fulfilled") return "(file not found on this branch)";
+        if (r.value.encoding === "base64") {
+          try { return atob(r.value.content.replace(/\n/g, "")); } catch { return r.value.content; }
+        }
+        return r.value.content;
+      };
+
+      return {
+        filename,
+        baseContent: decode(baseFile),
+        headContent: decode(headFile),
+      } as ConflictFile;
+    })
+  );
+
+  return results
+    .filter((r): r is PromiseFulfilledResult<ConflictFile> => r.status === "fulfilled")
+    .map((r) => r.value);
+}
+
 // ── Develop branch check ──────────────────────────────────────────
 
 export async function checkOnDevelop(
@@ -385,6 +760,162 @@ export async function checkOnDevelop(
     if (e instanceof Error && e.message.includes("404")) return "no-branch";
     return "no";
   }
+}
+
+// ── Labels ────────────────────────────────────────────────────────
+
+export interface RepoLabel {
+  id: number;
+  name: string;
+  color: string;
+  description: string | null;
+}
+
+export async function fetchRepoLabels(
+  token: string,
+  repo: string
+): Promise<RepoLabel[]> {
+  return ghFetch<RepoLabel[]>(token, `/repos/${repo}/labels?per_page=100`);
+}
+
+export async function addLabels(
+  token: string,
+  repo: string,
+  number: number,
+  labels: string[]
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/issues/${number}/labels`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ labels }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function removeLabel(
+  token: string,
+  repo: string,
+  number: number,
+  label: string
+): Promise<void> {
+  const res = await fetch(
+    `${BASE}/repos/${repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+// ── Quick Actions ─────────────────────────────────────────────────
+
+export async function submitReview(
+  token: string,
+  repo: string,
+  number: number,
+  event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+  body?: string
+): Promise<void> {
+  const payload: Record<string, string> = { event };
+  if (body) payload.body = body;
+  const res = await fetch(`${BASE}/repos/${repo}/pulls/${number}/reviews`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function closePR(
+  token: string,
+  repo: string,
+  number: number
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/pulls/${number}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ state: "closed" }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function mergePR(
+  token: string,
+  repo: string,
+  number: number,
+  method: "merge" | "squash" | "rebase" = "squash"
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/pulls/${number}/merge`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ merge_method: method }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+// ── Timeline ──────────────────────────────────────────────────────
+
+export interface TimelineEvent {
+  id: number;
+  event: string;
+  created_at: string;
+  actor?: { login: string; avatar_url: string };
+  body?: string;
+  commit_id?: string;
+  state?: string;
+  submitted_at?: string;
+  html_url?: string;
+  source?: { issue?: { number: number; title: string; html_url: string } };
+  label?: { name: string; color: string };
+  rename?: { from: string; to: string };
+}
+
+export async function fetchPRTimeline(
+  token: string,
+  repo: string,
+  number: number
+): Promise<TimelineEvent[]> {
+  return ghFetchAllPages<TimelineEvent>(token, `/repos/${repo}/issues/${number}/timeline`);
 }
 
 // ── OAuth Device Flow ──────────────────────────────────────────────

@@ -102,7 +102,7 @@ interface UsePRsReturn {
   lastRefreshed: Date | null;
 }
 
-export function usePRs(token: string | null): UsePRsReturn {
+export function usePRs(token: string | null, org?: string | null): UsePRsReturn {
   const [prs, setPRs] = useState<DashboardPR[]>([]);
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [loading, setLoading] = useState(false);
@@ -110,10 +110,16 @@ export function usePRs(token: string | null): UsePRsReturn {
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const abortRef = useRef(false);
+  const hasLoadedOnce = useRef(false);
 
   const load = useCallback(async () => {
     if (!token) return;
-    setLoading(true);
+    const isBackgroundRefresh = hasLoadedOnce.current;
+
+    // Only show full loading state on initial load
+    if (!isBackgroundRefresh) {
+      setLoading(true);
+    }
     setError(null);
     abortRef.current = false;
 
@@ -122,7 +128,7 @@ export function usePRs(token: string | null): UsePRsReturn {
       if (abortRef.current) return;
       setUser(ghUser);
 
-      const rawPRs = await fetchOpenPRs(token, ghUser.login);
+      const rawPRs = await fetchOpenPRs(token, ghUser.login, org);
       if (abortRef.current) return;
 
       // Categorize with initial data
@@ -130,21 +136,43 @@ export function usePRs(token: string | null): UsePRsReturn {
         ...pr,
         category: categorizePR(pr, ghUser.login),
       }));
-      setPRs(categorized);
+
+      if (isBackgroundRefresh) {
+        // Merge: update existing PRs in place, add new ones, remove closed ones
+        setPRs((prev) => {
+          const prevMap = new Map(prev.map((p) => [p.id, p]));
+          return categorized.map((pr) => {
+            const existing = prevMap.get(pr.id);
+            if (existing) {
+              // Keep enriched data if the PR hasn't been updated since
+              if (existing.updatedAt === pr.updatedAt) return existing;
+              // PR was updated — use new base data, preserve enriched fields that are still valid
+              return { ...existing, ...pr, category: categorizePR(pr, ghUser.login) };
+            }
+            return pr;
+          });
+        });
+      } else {
+        setPRs(categorized);
+      }
+
       setLoading(false);
+      hasLoadedOnce.current = true;
       setLastRefreshed(new Date());
 
       // Enrich in background
       setEnriching(true);
-      await enrichAllPRs(token, categorized, ghUser.login, (index, enrichedPR) => {
+      await enrichAllPRs(token, categorized, ghUser.login, (_index, enrichedPR) => {
         if (abortRef.current) return;
         const recategorized = {
           ...enrichedPR,
           category: categorizePR(enrichedPR, ghUser.login),
         };
         setPRs((prev) => {
+          const idx = prev.findIndex((p) => p.id === recategorized.id);
+          if (idx === -1) return prev;
           const next = [...prev];
-          next[index] = recategorized;
+          next[idx] = recategorized;
           return next;
         });
       });
@@ -155,7 +183,14 @@ export function usePRs(token: string | null): UsePRsReturn {
       setLoading(false);
       setEnriching(false);
     }
-  }, [token]);
+  }, [token, org]);
+
+  // Reset when org changes
+  useEffect(() => {
+    hasLoadedOnce.current = false;
+    setPRs([]);
+    setLastRefreshed(null);
+  }, [org]);
 
   useEffect(() => {
     load();
@@ -182,8 +217,12 @@ export interface FilterState {
   author: string | null;
   ciStatus: CIStatus | null;
   reviewStatus: ReviewState | null;
+  label: string | null;
+  isDraft: boolean | null;
+  hasConflicts: boolean | null;
   groupBy: GroupBy;
   hideBots: boolean;
+  hideOnDevelop: boolean;
   search: string;
 }
 
@@ -192,8 +231,12 @@ const defaultFilters: FilterState = {
   author: null,
   ciStatus: null,
   reviewStatus: null,
+  label: null,
+  isDraft: null,
+  hasConflicts: null,
   groupBy: "none",
   hideBots: false,
+  hideOnDevelop: false,
   search: "",
 };
 
@@ -210,11 +253,18 @@ export function useFilters(prs: DashboardPR[]) {
   const filteredPRs = useMemo(() => {
     return prs.filter((pr) => {
       if (filters.hideBots && pr.isBot) return false;
+      if (filters.hideOnDevelop && pr.onDevelop === "yes") return false;
       if (filters.repo && pr.repo !== filters.repo) return false;
       if (filters.author && pr.author !== filters.author) return false;
       if (filters.ciStatus && pr.ciStatus !== filters.ciStatus) return false;
       if (filters.reviewStatus && pr.reviewState !== filters.reviewStatus)
         return false;
+      if (filters.label && !pr.labels.some((l) => l.name === filters.label))
+        return false;
+      if (filters.isDraft === true && !pr.isDraft) return false;
+      if (filters.isDraft === false && pr.isDraft) return false;
+      if (filters.hasConflicts === true && !pr.hasConflicts) return false;
+      if (filters.hasConflicts === false && pr.hasConflicts) return false;
       if (filters.search) {
         const q = filters.search.toLowerCase();
         const match =
@@ -271,6 +321,11 @@ export function useFilters(prs: DashboardPR[]) {
     [prs, filters.hideBots]
   );
 
+  const availableLabels = useMemo(
+    () => [...new Set(prs.flatMap((p) => p.labels.map((l) => l.name)))].sort(),
+    [prs]
+  );
+
   return {
     filters,
     setFilter,
@@ -278,5 +333,6 @@ export function useFilters(prs: DashboardPR[]) {
     groupedPRs,
     availableRepos,
     availableAuthors,
+    availableLabels,
   };
 }

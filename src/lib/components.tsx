@@ -1,20 +1,67 @@
 "use client";
 
-import React, { useState, useEffect, useRef, type ReactNode } from "react";
-import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment } from "./github";
-import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment } from "./github";
+import React, { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
+import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, DailyActivity, ThreadResolution } from "./github";
+import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
+import rehypeHighlight from "rehype-highlight";
+import hljs from "highlight.js/lib/core";
+import hljsJavascript from "highlight.js/lib/languages/javascript";
+import hljsTypescript from "highlight.js/lib/languages/typescript";
+import hljsPython from "highlight.js/lib/languages/python";
+import hljsYaml from "highlight.js/lib/languages/yaml";
+import hljsJson from "highlight.js/lib/languages/json";
+import hljsGo from "highlight.js/lib/languages/go";
+import hljsBash from "highlight.js/lib/languages/bash";
+import hljsRust from "highlight.js/lib/languages/rust";
+import hljsCss from "highlight.js/lib/languages/css";
+import hljsXml from "highlight.js/lib/languages/xml";
+import hljsMarkdown from "highlight.js/lib/languages/markdown";
+import hljsSql from "highlight.js/lib/languages/sql";
+import hljsDockerfile from "highlight.js/lib/languages/dockerfile";
+import hljsNginx from "highlight.js/lib/languages/nginx";
+
+hljs.registerLanguage("javascript", hljsJavascript);
+hljs.registerLanguage("typescript", hljsTypescript);
+hljs.registerLanguage("python", hljsPython);
+hljs.registerLanguage("yaml", hljsYaml);
+hljs.registerLanguage("json", hljsJson);
+hljs.registerLanguage("go", hljsGo);
+hljs.registerLanguage("bash", hljsBash);
+hljs.registerLanguage("rust", hljsRust);
+hljs.registerLanguage("css", hljsCss);
+hljs.registerLanguage("xml", hljsXml);
+hljs.registerLanguage("markdown", hljsMarkdown);
+hljs.registerLanguage("sql", hljsSql);
+hljs.registerLanguage("dockerfile", hljsDockerfile);
+hljs.registerLanguage("nginx", hljsNginx);
 import {
   usePRs,
   useFilters,
-  useTheme,
+  useLocalStorage,
   type FilterState,
   type GroupBy,
   type Theme,
 } from "./hooks";
 import { timeAgo } from "./constants";
+import { cn } from "@/lib/utils";
+
+// shadcn/ui imports
+import { Button } from "@/components/ui/button";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 // ── Icons (inline SVGs) ────────────────────────────────────────────
 
@@ -65,6 +112,15 @@ function XIcon() {
   );
 }
 
+function CircleXIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M15 9l-6 6M9 9l6 6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function ClockIcon() {
   return (
     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -98,7 +154,7 @@ function ChevronIcon({ open }: { open: boolean }) {
 
 function InboxIcon() {
   return (
-    <svg className="w-16 h-16 text-[var(--muted)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+    <svg className="w-16 h-16 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
       <path d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
@@ -132,6 +188,8 @@ function MonitorIcon() {
 
 interface TokenScreenProps {
   onConnect: (token: string) => void;
+  theme: Theme;
+  setTheme: (t: Theme) => void;
 }
 
 type AuthMode = "choose" | "oauth" | "pat";
@@ -155,7 +213,59 @@ function CopyIcon() {
   );
 }
 
-export function TokenScreen({ onConnect }: TokenScreenProps) {
+function SlidersIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <line x1="4" y1="21" x2="4" y2="14" strokeLinecap="round" />
+      <line x1="4" y1="10" x2="4" y2="3" strokeLinecap="round" />
+      <line x1="12" y1="21" x2="12" y2="12" strokeLinecap="round" />
+      <line x1="12" y1="8" x2="12" y2="3" strokeLinecap="round" />
+      <line x1="20" y1="21" x2="20" y2="16" strokeLinecap="round" />
+      <line x1="20" y1="12" x2="20" y2="3" strokeLinecap="round" />
+      <line x1="1" y1="14" x2="7" y2="14" strokeLinecap="round" />
+      <line x1="9" y1="8" x2="15" y2="8" strokeLinecap="round" />
+      <line x1="17" y1="16" x2="23" y2="16" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MergeIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <circle cx="18" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <path d="M6 21V9a9 9 0 009 9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BellIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13.73 21a2 2 0 01-3.46 0" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function KeyboardIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <rect x="2" y="4" width="20" height="16" rx="2" ry="2" />
+      <line x1="6" y1="8" x2="6.01" y2="8" strokeLinecap="round" />
+      <line x1="10" y1="8" x2="10.01" y2="8" strokeLinecap="round" />
+      <line x1="14" y1="8" x2="14.01" y2="8" strokeLinecap="round" />
+      <line x1="18" y1="8" x2="18.01" y2="8" strokeLinecap="round" />
+      <line x1="6" y1="12" x2="6.01" y2="12" strokeLinecap="round" />
+      <line x1="10" y1="12" x2="10.01" y2="12" strokeLinecap="round" />
+      <line x1="14" y1="12" x2="14.01" y2="12" strokeLinecap="round" />
+      <line x1="18" y1="12" x2="18.01" y2="12" strokeLinecap="round" />
+      <line x1="8" y1="16" x2="16" y2="16" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function TokenScreen({ onConnect, theme, setTheme }: TokenScreenProps) {
   const [mode, setMode] = useState<AuthMode>(GITHUB_CLIENT_ID ? "choose" : "pat");
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
@@ -237,153 +347,186 @@ export function TokenScreen({ onConnect }: TokenScreenProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-[var(--background)] via-[var(--surface)] to-[var(--background)]">
-      <div className="w-full max-w-md rounded-2xl bg-[var(--card)] border border-[var(--border)] shadow-xl p-8 space-y-6 backdrop-blur-sm">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-16 h-16 rounded-2xl bg-[var(--surface)] flex items-center justify-center">
-            <GitHubIcon className="w-9 h-9 text-[var(--foreground)]" />
+    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-background via-muted to-background animate-fade-in">
+      <Card className="w-full max-w-md shadow-xl backdrop-blur-sm animate-scale-in">
+        <CardHeader className="flex flex-col items-center gap-3">
+          <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center">
+            <GitHubIcon className="w-9 h-9 text-foreground" />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight">GitHub Dashboard</h1>
-          <p className="text-sm text-[var(--muted)] text-center">
+          <CardTitle className="text-2xl font-semibold tracking-tight">GitHub Dashboard</CardTitle>
+          <CardDescription className="text-center">
             Sign in to view your pull requests across all repos
-          </p>
-        </div>
+          </CardDescription>
+        </CardHeader>
 
-        {error && (
-          <div className="px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">
-            {error}
-          </div>
-        )}
-
-        {/* Choose mode */}
-        {mode === "choose" && (
-          <div className="space-y-3">
-            <button
-              onClick={startOAuth}
-              disabled={loading}
-              className="w-full py-2.5 px-4 rounded-xl bg-[var(--foreground)] text-[var(--background)] font-medium text-sm hover:opacity-90 disabled:opacity-50 transition-all cursor-pointer disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                "Connecting..."
-              ) : (
-                <>
-                  <GitHubIcon className="w-4 h-4" />
-                  Sign in with GitHub
-                </>
-              )}
-            </button>
-
-            <div className="flex items-center gap-3">
-              <div className="flex-1 h-px bg-[var(--border)]" />
-              <span className="text-xs text-[var(--muted)]">or</span>
-              <div className="flex-1 h-px bg-[var(--border)]" />
+        <CardContent className="space-y-6">
+          {error && (
+            <div className="px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">
+              {error}
             </div>
+          )}
 
-            <button
-              onClick={() => setMode("pat")}
-              className="w-full py-2.5 px-4 rounded-xl bg-[var(--surface)] text-[var(--foreground)] border border-[var(--border)] font-medium text-sm hover:bg-[var(--border)] transition-all cursor-pointer"
-            >
-              Use a Personal Access Token
-            </button>
-          </div>
-        )}
-
-        {/* OAuth device flow */}
-        {mode === "oauth" && oauthState && (
-          <div className="space-y-4">
-            <div className="text-center space-y-2">
-              <p className="text-sm text-[var(--muted)]">
-                Go to{" "}
-                <a
-                  href={oauthState.verificationUri}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[var(--accent)] font-medium hover:underline"
-                >
-                  github.com/login/device
-                </a>{" "}
-                and enter this code:
-              </p>
-            </div>
-
-            <button
-              onClick={handleCopyCode}
-              className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--border-hover)] transition-all cursor-pointer group"
-            >
-              <span className="text-2xl font-mono font-bold tracking-[0.3em] text-[var(--foreground)]">
-                {oauthState.userCode}
-              </span>
-              <span className="text-[var(--muted)] group-hover:text-[var(--foreground)] transition-colors">
-                {copied ? (
-                  <CheckIcon />
-                ) : (
-                  <CopyIcon />
-                )}
-              </span>
-            </button>
-
-            <p className="text-xs text-[var(--muted)] text-center">
-              {copied ? "Copied!" : "Click to copy"} &middot; Waiting for authorization...
-            </p>
-
-            <div className="flex justify-center">
-              <div className="flex gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce" style={{ animationDelay: "0ms" }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce" style={{ animationDelay: "150ms" }} />
-                <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-bounce" style={{ animationDelay: "300ms" }} />
-              </div>
-            </div>
-
-            <button
-              onClick={cancelOAuth}
-              className="w-full py-2 text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors cursor-pointer"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-
-        {/* PAT mode */}
-        {mode === "pat" && (
-          <form onSubmit={handlePATSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="token" className="text-sm font-medium text-[var(--foreground)]">
-                Personal Access Token
-              </label>
-              <input
-                id="token"
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-                className="w-full px-4 py-2.5 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-[var(--foreground)] placeholder:text-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all text-sm font-mono"
-                autoFocus
-              />
-              <p className="text-xs text-[var(--muted)]">
-                Requires <code className="bg-[var(--surface)] px-1.5 py-0.5 rounded text-xs">repo</code> and{" "}
-                <code className="bg-[var(--surface)] px-1.5 py-0.5 rounded text-xs">read:org</code> scopes
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading || !token.trim()}
-              className="w-full py-2.5 px-4 rounded-xl bg-[var(--foreground)] text-[var(--background)] font-medium text-sm hover:opacity-90 disabled:opacity-50 transition-all cursor-pointer disabled:cursor-not-allowed"
-            >
-              {loading ? "Connecting..." : "Connect"}
-            </button>
-
-            {GITHUB_CLIENT_ID && (
-              <button
-                type="button"
-                onClick={() => { setMode("choose"); setError(null); }}
-                className="w-full py-2 text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors cursor-pointer"
+          {/* Choose mode */}
+          {mode === "choose" && (
+            <div className="space-y-3">
+              <Button
+                onClick={startOAuth}
+                disabled={loading}
+                className="w-full"
+                size="lg"
               >
-                Back to sign in options
+                {loading ? (
+                  "Connecting..."
+                ) : (
+                  <>
+                    <GitHubIcon className="w-4 h-4" />
+                    Sign in with GitHub
+                  </>
+                )}
+              </Button>
+
+              <div className="flex items-center gap-3">
+                <Separator className="flex-1" />
+                <span className="text-xs text-muted-foreground">or</span>
+                <Separator className="flex-1" />
+              </div>
+
+              <Button
+                variant="outline"
+                onClick={() => setMode("pat")}
+                className="w-full"
+                size="lg"
+              >
+                Use a Personal Access Token
+              </Button>
+            </div>
+          )}
+
+          {/* OAuth device flow */}
+          {mode === "oauth" && oauthState && (
+            <div className="space-y-4">
+              <div className="text-center space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  Go to{" "}
+                  <a
+                    href={oauthState.verificationUri}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary font-medium hover:underline"
+                  >
+                    github.com/login/device
+                  </a>{" "}
+                  and enter this code:
+                </p>
+              </div>
+
+              <button
+                onClick={handleCopyCode}
+                className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-muted border border-border hover:border-border/80 transition-all cursor-pointer group"
+              >
+                <span className="text-2xl font-mono font-bold tracking-[0.3em] text-foreground">
+                  {oauthState.userCode}
+                </span>
+                <span className="text-muted-foreground group-hover:text-foreground transition-colors">
+                  {copied ? (
+                    <CheckIcon />
+                  ) : (
+                    <CopyIcon />
+                  )}
+                </span>
               </button>
-            )}
-          </form>
-        )}
+
+              <p className="text-xs text-muted-foreground text-center">
+                {copied ? "Copied!" : "Click to copy"} &middot; Waiting for authorization...
+              </p>
+
+              <div className="flex justify-center">
+                <div className="flex gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "300ms" }} />
+                </div>
+              </div>
+
+              <Button
+                variant="ghost"
+                onClick={cancelOAuth}
+                className="w-full text-xs text-muted-foreground"
+              >
+                Cancel
+              </Button>
+            </div>
+          )}
+
+          {/* PAT mode */}
+          {mode === "pat" && (
+            <form onSubmit={handlePATSubmit} className="space-y-4">
+              <div className="space-y-2">
+                <label htmlFor="token" className="text-sm font-medium text-foreground">
+                  Personal Access Token
+                </label>
+                <Input
+                  id="token"
+                  type="password"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                  className="font-mono"
+                  autoFocus
+                />
+                <p className="text-xs text-muted-foreground">
+                  Requires <code className="bg-muted px-1.5 py-0.5 rounded text-xs">repo</code> and{" "}
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">read:org</code> scopes
+                </p>
+              </div>
+
+              <Button
+                type="submit"
+                disabled={loading || !token.trim()}
+                className="w-full"
+                size="lg"
+              >
+                {loading ? "Connecting..." : "Connect"}
+              </Button>
+
+              {GITHUB_CLIENT_ID && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => { setMode("choose"); setError(null); }}
+                  className="w-full text-xs text-muted-foreground"
+                >
+                  Back to sign in options
+                </Button>
+              )}
+            </form>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Theme toggle */}
+      <div className="fixed bottom-4 right-4">
+        <ToggleGroup
+          value={[theme]}
+          onValueChange={(values) => {
+            if (values.length > 0) setTheme(values[0] as Theme);
+          }}
+          className="bg-card/80 backdrop-blur-sm border border-border rounded-lg p-0.5 shadow-lg"
+        >
+          {([["light", <SunIcon key="s" />], ["system", <MonitorIcon key="m" />], ["dark", <MoonIcon key="d" />]] as [Theme, React.ReactNode][]).map(([t, icon]) => (
+            <ToggleGroupItem
+              key={t}
+              value={t}
+              size="sm"
+              className={cn(
+                "p-1.5 rounded-md",
+                theme === t ? "bg-muted text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {icon}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
       </div>
     </div>
   );
@@ -401,6 +544,9 @@ interface HeaderProps {
   prCount: number;
   theme: Theme;
   setTheme: (t: Theme) => void;
+  org: string | null;
+  orgs: Array<{ login: string; avatar_url: string }>;
+  onOrgChange: (org: string | null) => void;
 }
 
 function Header({
@@ -413,60 +559,91 @@ function Header({
   prCount,
   theme,
   setTheme,
+  org,
+  orgs,
+  onOrgChange,
 }: HeaderProps) {
   return (
-    <header className="sticky top-0 z-10 bg-[var(--background)]/80 backdrop-blur-md border-b border-[var(--border)]">
+    <header className="sticky top-0 z-10 bg-background/80 backdrop-blur-md border-b border-border animate-fade-in-down">
       <div className="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <GitHubIcon className="w-6 h-6 text-[var(--foreground)]" />
+          <GitHubIcon className="w-6 h-6 text-foreground" />
           <h1 className="text-base font-semibold tracking-tight">Dashboard</h1>
           {prCount > 0 && (
-            <span className="text-xs bg-[var(--surface)] text-[var(--muted)] px-2 py-0.5 rounded-full font-medium">
+            <Badge variant="secondary">
               {prCount} PRs
-            </span>
+            </Badge>
+          )}
+          {orgs.length > 0 && (
+            <select
+              value={org ?? ""}
+              onChange={(e) => onOrgChange(e.target.value || null)}
+              className="h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground cursor-pointer hover:bg-muted transition-colors"
+            >
+              <option value="">All orgs</option>
+              {orgs.map((o) => (
+                <option key={o.login} value={o.login}>{o.login}</option>
+              ))}
+            </select>
           )}
         </div>
 
         <div className="flex items-center gap-3">
           {lastRefreshed && (
-            <span className="text-xs text-[var(--muted)] hidden sm:block">
+            <span className="text-xs text-muted-foreground hidden sm:block">
               {enriching ? "Updating..." : `Updated ${timeAgo(lastRefreshed.toISOString())}`}
             </span>
           )}
-          <div className="flex items-center bg-[var(--surface)] rounded-lg p-0.5">
+          <ToggleGroup
+            value={[theme]}
+            onValueChange={(values) => {
+              if (values.length > 0) setTheme(values[0] as Theme);
+            }}
+            className="bg-muted rounded-lg p-0.5"
+          >
             {([["light", <SunIcon key="s" />], ["system", <MonitorIcon key="m" />], ["dark", <MoonIcon key="d" />]] as [Theme, React.ReactNode][]).map(([t, icon]) => (
-              <button
+              <ToggleGroupItem
                 key={t}
-                onClick={() => setTheme(t)}
-                className={`p-1.5 rounded-md transition-all cursor-pointer ${theme === t ? "bg-[var(--card)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted)] hover:text-[var(--foreground)]"}`}
-                title={t.charAt(0).toUpperCase() + t.slice(1)}
+                value={t}
+                size="sm"
+                className={cn(
+                  "p-1.5 rounded-md",
+                  theme === t ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                )}
               >
                 {icon}
-              </button>
+              </ToggleGroupItem>
             ))}
-          </div>
-          <button
-            onClick={onRefresh}
-            disabled={loading}
-            className="p-2 rounded-lg hover:bg-[var(--surface)] transition-colors text-[var(--muted)] hover:text-[var(--foreground)] cursor-pointer disabled:cursor-not-allowed"
-            title="Refresh"
-          >
-            <RefreshIcon spinning={loading} />
-          </button>
+          </ToggleGroup>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onRefresh}
+                  disabled={loading}
+                />
+              }
+            >
+              <RefreshIcon spinning={loading} />
+            </TooltipTrigger>
+            <TooltipContent>Refresh</TooltipContent>
+          </Tooltip>
           {user && (
             <div className="flex items-center gap-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={user.avatar_url}
-                alt={user.login}
-                className="w-7 h-7 rounded-full ring-1 ring-[var(--border)]"
-              />
-              <button
+              <Avatar size="sm">
+                <AvatarImage src={user.avatar_url} alt={user.login} />
+                <AvatarFallback>{user.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+              </Avatar>
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={onDisconnect}
-                className="text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors cursor-pointer"
+                className="text-xs text-muted-foreground hover:text-foreground"
               >
                 Disconnect
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -482,6 +659,7 @@ interface FilterBarProps {
   setFilter: <K extends keyof FilterState>(key: K, value: FilterState[K]) => void;
   availableRepos: string[];
   availableAuthors: string[];
+  availableLabels: string[];
 }
 
 const groupByOptions: { value: GroupBy; label: string }[] = [
@@ -496,79 +674,181 @@ function FilterBar({
   setFilter,
   availableRepos,
   availableAuthors,
+  availableLabels,
 }: FilterBarProps) {
+  const [advanced, setAdvanced] = useState(false);
+
+  const advancedFilterCount =
+    (filters.label ? 1 : 0) +
+    (filters.hideBots ? 1 : 0) +
+    (filters.hideOnDevelop ? 1 : 0);
+
   return (
-    <div className="flex flex-wrap items-center gap-2 py-3">
-      {/* Search */}
-      <div className="relative flex-1 min-w-[200px]">
-        <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-[var(--muted)]">
-          <SearchIcon />
+    <div className="py-3 space-y-2">
+      {/* Primary row */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Search */}
+        <div className="relative flex-1 min-w-[200px]">
+          <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none text-muted-foreground">
+            <SearchIcon />
+          </div>
+          <Input
+            type="text"
+            value={filters.search}
+            onChange={(e) => setFilter("search", e.target.value)}
+            placeholder="Search PRs..."
+            className="pl-9"
+          />
         </div>
-        <input
-          type="text"
-          value={filters.search}
-          onChange={(e) => setFilter("search", e.target.value)}
-          placeholder="Search PRs..."
-          className="w-full pl-9 pr-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent transition-all"
-        />
+
+        {/* Repo filter */}
+        <Select
+          value={filters.repo ?? ""}
+          onValueChange={(v) => setFilter("repo", v || null)}
+        >
+          <SelectTrigger size="sm">
+            <SelectValue placeholder="All repos" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">All repos</SelectItem>
+            {availableRepos.map((r) => (
+              <SelectItem key={r} value={r}>
+                {r}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {/* Author filter */}
+        <Select
+          value={filters.author ?? ""}
+          onValueChange={(v) => setFilter("author", v || null)}
+        >
+          <SelectTrigger size="sm">
+            <SelectValue placeholder="All authors" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">All authors</SelectItem>
+            {availableAuthors.map((a) => (
+              <SelectItem key={a} value={a}>
+                {a}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        {/* Group by segmented control */}
+        <ToggleGroup
+          value={[filters.groupBy]}
+          onValueChange={(values) => {
+            if (values.length > 0) setFilter("groupBy", values[0] as GroupBy);
+          }}
+          className="bg-muted border border-border rounded-lg p-0.5"
+        >
+          {groupByOptions.map((opt) => (
+            <ToggleGroupItem
+              key={opt.value}
+              value={opt.value}
+              size="sm"
+              className={cn(
+                "px-3 py-1.5 rounded-md text-xs font-medium",
+                filters.groupBy === opt.value
+                  ? "bg-foreground text-background shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {opt.label}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+
+        {/* Advanced toggle button */}
+        <Button
+          variant={advanced || advancedFilterCount > 0 ? "secondary" : "ghost"}
+          size="sm"
+          onClick={() => setAdvanced(!advanced)}
+          className="gap-1.5"
+        >
+          <SlidersIcon />
+          <span className="text-xs">Filters</span>
+          {advancedFilterCount > 0 && (
+            <span className="ml-0.5 bg-primary text-primary-foreground text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
+              {advancedFilterCount}
+            </span>
+          )}
+        </Button>
       </div>
 
-      {/* Repo filter */}
-      <select
-        value={filters.repo ?? ""}
-        onChange={(e) => setFilter("repo", e.target.value || null)}
-        className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--border)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all cursor-pointer appearance-none"
-      >
-        <option value="">All repos</option>
-        {availableRepos.map((r) => (
-          <option key={r} value={r}>
-            {r}
-          </option>
-        ))}
-      </select>
+      {/* Advanced filters row */}
+      {advanced && (
+        <div className="flex flex-wrap items-center gap-2 pt-1 pb-1 px-1 bg-muted/50 rounded-lg border border-border/50">
+          {/* Label */}
+          {availableLabels.length > 0 && (
+            <Select
+              value={filters.label ?? ""}
+              onValueChange={(v) => setFilter("label", v || null)}
+            >
+              <SelectTrigger size="sm">
+                <SelectValue placeholder="Label" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">Any label</SelectItem>
+                {availableLabels.map((l) => (
+                  <SelectItem key={l} value={l}>
+                    {l}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
 
-      {/* Author filter */}
-      <select
-        value={filters.author ?? ""}
-        onChange={(e) => setFilter("author", e.target.value || null)}
-        className="px-3 py-2 rounded-lg bg-[var(--surface)] border border-[var(--border)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] transition-all cursor-pointer appearance-none"
-      >
-        <option value="">All authors</option>
-        {availableAuthors.map((a) => (
-          <option key={a} value={a}>
-            {a}
-          </option>
-        ))}
-      </select>
+          {/* Hide bots toggle */}
+          <div className="flex items-center gap-2">
+            <Checkbox
+              checked={filters.hideBots}
+              onCheckedChange={(checked) => setFilter("hideBots", !!checked)}
+              id="hide-bots"
+            />
+            <label
+              htmlFor="hide-bots"
+              className="text-xs font-medium text-muted-foreground cursor-pointer select-none"
+            >
+              Hide bots
+            </label>
+          </div>
 
-      {/* Group by segmented control */}
-      <div className="flex rounded-lg bg-[var(--surface)] border border-[var(--border)] p-0.5">
-        {groupByOptions.map((opt) => (
-          <button
-            key={opt.value}
-            onClick={() => setFilter("groupBy", opt.value)}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer ${
-              filters.groupBy === opt.value
-                ? "bg-[var(--foreground)] text-[var(--background)] shadow-sm"
-                : "text-[var(--muted)] hover:text-[var(--foreground)]"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
+          {/* Hide on develop toggle */}
+          <div className="flex items-center gap-2">
+            <Checkbox
+              checked={filters.hideOnDevelop}
+              onCheckedChange={(checked) => setFilter("hideOnDevelop", !!checked)}
+              id="hide-on-develop"
+            />
+            <label
+              htmlFor="hide-on-develop"
+              className="text-xs font-medium text-muted-foreground cursor-pointer select-none"
+            >
+              Hide on develop
+            </label>
+          </div>
 
-      {/* Hide bots toggle */}
-      <button
-        onClick={() => setFilter("hideBots", !filters.hideBots)}
-        className={`px-3 py-2 rounded-lg border text-xs font-medium transition-all cursor-pointer ${
-          filters.hideBots
-            ? "bg-[var(--foreground)] text-[var(--background)] border-[var(--foreground)]"
-            : "bg-[var(--surface)] text-[var(--muted)] border-[var(--border)] hover:text-[var(--foreground)]"
-        }`}
-      >
-        Hide bots
-      </button>
+          {/* Clear all */}
+          {advancedFilterCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-xs text-muted-foreground ml-auto"
+              onClick={() => {
+                setFilter("label", null);
+                setFilter("hideBots", false);
+                setFilter("hideOnDevelop", false);
+              }}
+            >
+              Clear filters
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -585,10 +865,10 @@ function CIBadge({ status }: { status: CIStatus }) {
   };
   const c = config[status];
   return (
-    <div className="flex items-center gap-1.5" title={`CI: ${c.label}`}>
+    <Badge variant="outline" className="gap-1.5 font-normal">
       <span className={`w-2 h-2 rounded-full ${c.color} ${c.pulse ? "animate-pulse" : ""}`} />
-      <span className="text-xs text-[var(--muted)]">{c.label}</span>
-    </div>
+      {c.label}
+    </Badge>
   );
 }
 
@@ -600,14 +880,14 @@ function ReviewBadge({ state }: { state: ReviewState }) {
     changes_requested: { icon: <XIcon />, color: "text-red-500", label: "Changes requested" },
     review_required: { icon: <ClockIcon />, color: "text-amber-500", label: "Review required" },
     commented: { icon: <ClockIcon />, color: "text-blue-400", label: "Commented" },
-    unknown: { icon: <ClockIcon />, color: "text-[var(--muted)]", label: "Pending" },
+    unknown: { icon: <ClockIcon />, color: "text-muted-foreground", label: "Pending" },
   };
   const c = config[state];
   return (
-    <div className={`flex items-center gap-1 ${c.color}`} title={c.label}>
+    <Badge variant="outline" className={cn("gap-1 font-normal", c.color)}>
       {c.icon}
-      <span className="text-xs">{c.label}</span>
-    </div>
+      {c.label}
+    </Badge>
   );
 }
 
@@ -622,35 +902,220 @@ function accentColor(pr: DashboardPR): string {
   return "border-l-transparent";
 }
 
-function PRCard({ pr, selected, onSelect }: { pr: DashboardPR; selected: boolean; onSelect: () => void }) {
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return `${m}m ${rs}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+// ── PR Seen tracking (list level) ─────────────────────────────────
+
+const PR_SEEN_KEY = "gh-pr-seen-at";
+
+function loadPRSeenMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(PR_SEEN_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return {};
+}
+
+function markPRSeen(pr: DashboardPR) {
+  try {
+    const map = loadPRSeenMap();
+    map[`${pr.repo}#${pr.number}`] = pr.updatedAt;
+    localStorage.setItem(PR_SEEN_KEY, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+function unmarkPRSeen(pr: DashboardPR) {
+  try {
+    const map = loadPRSeenMap();
+    delete map[`${pr.repo}#${pr.number}`];
+    localStorage.setItem(PR_SEEN_KEY, JSON.stringify(map));
+  } catch { /* ignore */ }
+}
+
+function PRAgeIndicator({ createdAt }: { createdAt: string }) {
+  const days = Math.floor((Date.now() - new Date(createdAt).getTime()) / 86400000);
+  if (days < 1) return null;
+  const color = days >= 14 ? "text-red-500 bg-red-500/10" : days >= 7 ? "text-amber-500 bg-amber-500/10" : "text-muted-foreground bg-muted";
+  return <span className={cn("text-[9px] font-medium px-1 py-0 rounded-full", color)}>{days}d</span>;
+}
+
+function PRCard({ pr, selected, seen, onSelect, onToggleSeen, batchMode, batchSelected, onBatchToggle }: {
+  pr: DashboardPR;
+  selected: boolean;
+  seen: boolean;
+  onSelect: () => void;
+  onToggleSeen: () => void;
+  batchMode: boolean;
+  batchSelected: boolean;
+  onBatchToggle: () => void;
+}) {
+  const [swiped, setSwiped] = useState(false);
+  const startX = useRef(0);
+  const currentX = useRef(0);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    startX.current = e.clientX;
+    currentX.current = e.clientX;
+    dragging.current = false;
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!startX.current) return;
+    currentX.current = e.clientX;
+    const dx = currentX.current - startX.current;
+    if (Math.abs(dx) > 5) dragging.current = true;
+    if (cardRef.current && dx > 0) {
+      cardRef.current.style.transform = `translateX(${Math.min(dx, 80)}px)`;
+      cardRef.current.style.transition = "none";
+    }
+  };
+
+  const handlePointerUp = () => {
+    const dx = currentX.current - startX.current;
+    if (cardRef.current) {
+      cardRef.current.style.transition = "transform 200ms ease";
+      cardRef.current.style.transform = "";
+    }
+    if (dx > 60) {
+      setSwiped(true);
+      onToggleSeen();
+    }
+    startX.current = 0;
+    currentX.current = 0;
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (dragging.current) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    onSelect();
+  };
+
+  const [swiping, setSwiping] = useState(false);
+
+  const handlePointerDownWrapped = (e: React.PointerEvent) => {
+    handlePointerDown(e);
+    setSwiping(true);
+  };
+
+  const handlePointerUpWrapped = (e: React.PointerEvent) => {
+    void e;
+    handlePointerUp();
+    setTimeout(() => setSwiping(false), 200);
+  };
+
   return (
-    <button
-      onClick={onSelect}
-      className={`w-full text-left rounded-xl border border-l-[3px] ${accentColor(pr)} transition-all duration-150 cursor-pointer ${
-        selected
-          ? "bg-[var(--accent)]/10 border-[var(--accent)]/30 shadow-sm"
-          : "bg-[var(--card)] border-[var(--border)] hover:border-[var(--border-hover)] hover:shadow-sm"
-      }`}
-    >
-      <div className="px-3 py-2.5 flex items-center gap-3">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={pr.authorAvatar} alt={pr.author} className="w-7 h-7 rounded-full ring-1 ring-[var(--border)] shrink-0" />
-        <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-medium text-[var(--foreground)] leading-snug truncate">{pr.title}</h3>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className="text-[11px] text-[var(--muted)] font-mono">{pr.repo.split("/")[1]}#{pr.number}</span>
-            <span className="text-[11px] text-[var(--muted)]">{pr.author}</span>
-            {pr.isDraft && <span className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 rounded bg-[var(--surface)] text-[var(--muted)]">Draft</span>}
-          </div>
+    <div className="relative overflow-hidden rounded-xl">
+      {/* Swipe reveal background — only visible during active swipe */}
+      {swiping && (
+        <div className={cn(
+          "absolute inset-0 flex items-center pl-4 rounded-xl",
+          seen ? "bg-amber-500/20" : "bg-emerald-500/20"
+        )}>
+          <span className="text-xs font-medium text-muted-foreground">
+            {seen ? "Mark unseen" : "Mark seen"}
+          </span>
         </div>
-        <div className="flex flex-col items-end gap-1 shrink-0">
-          <span className="text-[10px] text-[var(--muted)]">{timeAgo(pr.updatedAt)}</span>
-          <div className="flex items-center gap-1.5">
-            <CIBadge status={pr.ciStatus} />
+      )}
+      <div
+        ref={cardRef}
+        onPointerDown={handlePointerDownWrapped}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUpWrapped}
+        onPointerLeave={() => {
+          if (startX.current && cardRef.current) {
+            cardRef.current.style.transition = "transform 200ms ease";
+            cardRef.current.style.transform = "";
+            startX.current = 0;
+          }
+          setSwiping(false);
+        }}
+        onClick={handleClick}
+        className={cn(
+          "relative w-full text-left rounded-xl border border-l-[3px] transition-all duration-150 cursor-pointer group/card",
+          accentColor(pr),
+          selected
+            ? "bg-accent/10 border-accent/30 shadow-sm"
+            : "bg-card border-border hover:border-border/80 hover:shadow-sm",
+          seen && !selected && "opacity-50",
+          swiped && "transition-opacity duration-300"
+        )}
+      >
+        <div className="px-3 py-2.5 flex items-center gap-3">
+          {batchMode && (
+            <input
+              type="checkbox"
+              checked={batchSelected}
+              onChange={(e) => { e.stopPropagation(); onBatchToggle(); }}
+              onClick={(e) => e.stopPropagation()}
+              className="shrink-0 w-3.5 h-3.5 rounded border-border accent-primary cursor-pointer"
+            />
+          )}
+          <Avatar size="sm">
+            <AvatarImage src={pr.authorAvatar} alt={pr.author} />
+            <AvatarFallback>{pr.author.slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
+          <div className="flex-1 min-w-0">
+            <h3 className="text-sm font-medium text-foreground leading-snug truncate">{pr.title}</h3>
+            <div className="flex items-center gap-x-2 gap-y-0.5 mt-0.5 flex-wrap">
+              <span className="text-[11px] text-muted-foreground font-mono shrink-0">{pr.repo.split("/")[1]}#{pr.number}</span>
+              <span className="text-[11px] text-muted-foreground shrink-0 truncate max-w-[120px]">{pr.author}</span>
+              <PRAgeIndicator createdAt={pr.createdAt} />
+              {pr.isDraft && <Badge variant="secondary" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto shrink-0">Draft</Badge>}
+              {pr.onDevelop === "yes" && <Badge variant="outline" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto text-emerald-500 border-emerald-500/30 shrink-0">On develop</Badge>}
+              {(pr.additions > 0 || pr.deletions > 0) && (
+                <span className="text-[10px] font-mono text-muted-foreground shrink-0">
+                  <span className="text-green-500">+{pr.additions}</span>
+                  <span className="mx-0.5">/</span>
+                  <span className="text-red-500">-{pr.deletions}</span>
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Toggle seen button on hover */}
+            <button
+              className="opacity-0 group-hover/card:opacity-100 transition-opacity p-1 rounded-md hover:bg-muted"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleSeen();
+              }}
+              title={seen ? "Mark as unseen" : "Mark as seen"}
+            >
+              {seen ? (
+                <svg className="w-3.5 h-3.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path d="M3 12s2-6 9-6 9 6 9 6-2 6-9 6-9-6-9-6z" strokeLinecap="round" strokeLinejoin="round" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              ) : (
+                <svg className="w-3.5 h-3.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" strokeLinecap="round" strokeLinejoin="round" />
+                  <line x1="1" y1="1" x2="23" y2="23" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </button>
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-[10px] text-muted-foreground">{timeAgo(pr.updatedAt)}</span>
+              <div className="flex items-center gap-1.5">
+                <CIBadge status={pr.ciStatus} />
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -694,7 +1159,6 @@ function ThreadReplyForm({ token, repo, prNumber, inReplyTo, onPosted }: {
   const [body, setBody] = useState("");
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
 
   const submit = async () => {
     if (!body.trim()) return;
@@ -704,7 +1168,6 @@ function ThreadReplyForm({ token, repo, prNumber, inReplyTo, onPosted }: {
       const comment = await postReviewComment(token, repo, prNumber, body.trim(), inReplyTo);
       onPosted(comment);
       setBody("");
-      setExpanded(false);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to post reply");
     } finally {
@@ -712,66 +1175,51 @@ function ThreadReplyForm({ token, repo, prNumber, inReplyTo, onPosted }: {
     }
   };
 
-  if (!expanded) {
-    return (
-      <button
-        onClick={() => setExpanded(true)}
-        className="text-xs text-[var(--accent)] hover:underline cursor-pointer mt-1"
-      >
-        Reply...
-      </button>
-    );
-  }
-
   return (
-    <div className="mt-2">
-      <textarea
+    <div className="mt-1 flex gap-2 items-start">
+      <Textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
-        placeholder="Write a reply..."
-        rows={2}
-        autoFocus
-        className="w-full rounded-lg bg-[var(--background)] border border-[var(--border)] text-xs text-[var(--foreground)] placeholder:text-[var(--muted)] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y transition-all"
+        placeholder="Reply..."
+        rows={1}
+        className="text-xs min-h-8 flex-1 resize-none"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
-          if (e.key === "Escape") { setExpanded(false); setBody(""); }
         }}
       />
-      {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
-      <div className="flex items-center gap-2 mt-1">
-        <button
-          onClick={submit}
-          disabled={posting || !body.trim()}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--foreground)] text-[var(--background)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
-        >
-          {posting ? "Posting..." : "Reply"}
-        </button>
-        <button
-          onClick={() => { setExpanded(false); setBody(""); }}
-          className="px-2.5 py-1 rounded-md text-xs text-[var(--muted)] hover:text-[var(--foreground)] cursor-pointer"
-        >
-          Cancel
-        </button>
-      </div>
+      <Button
+        size="xs"
+        onClick={submit}
+        disabled={posting || !body.trim()}
+        className="shrink-0 mt-0.5"
+      >
+        {posting ? "..." : "Reply"}
+      </Button>
+      {error && <p className="text-xs text-red-500">{error}</p>}
     </div>
   );
 }
 
 // ── Diff Hunk Preview ─────────────────────────────────────────────
 
-function DiffHunkPreview({ hunk }: { hunk: string }) {
+function DiffHunkPreview({ hunk, filename }: { hunk: string; filename?: string }) {
   const lines = hunk.split("\n");
+  const lang = filename ? langForFile(filename) : null;
+  const parsed = lines.map((line) => ({
+    content: line,
+    type: line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : line.startsWith("@@") ? "hunk" : "context",
+  }));
+  const highlighted = React.useMemo(() => highlightDiffLines(parsed, lang), [hunk, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    <pre className="bg-[var(--surface)] border border-[var(--border)] rounded-md px-3 py-2 overflow-x-auto text-[11px] leading-relaxed font-mono my-1">
+    <pre className="bg-muted border border-border rounded-md px-3 py-2 overflow-x-auto text-[11px] leading-relaxed font-mono my-1">
       {lines.map((line, i) => {
-        let color = "text-[var(--foreground)]";
+        let color = "text-foreground";
         if (line.startsWith("+")) color = "text-emerald-500";
         else if (line.startsWith("-")) color = "text-red-500";
         else if (line.startsWith("@@")) color = "text-blue-400";
         return (
-          <div key={i} className={color}>
-            {line}
-          </div>
+          <div key={i} className={color} dangerouslySetInnerHTML={{ __html: highlighted[i] ?? escapeHtml(line) }} />
         );
       })}
     </pre>
@@ -780,53 +1228,116 @@ function DiffHunkPreview({ hunk }: { hunk: string }) {
 
 // ── Review Comment Thread ─────────────────────────────────────────
 
-function ReviewThread({ thread, token, repo, prNumber, onReplyPosted }: {
+function ReviewThread({ thread, token, repo, prNumber, onReplyPosted, threadInfo, onResolutionChanged }: {
   thread: { root: ReviewComment; replies: ReviewComment[] };
   token: string;
   repo: string;
   prNumber: number;
   onReplyPosted: (c: ReviewComment) => void;
+  threadInfo?: ReviewThreadInfo;
+  onResolutionChanged?: (threadId: string, resolved: boolean) => void;
 }) {
   const allComments = [thread.root, ...thread.replies];
+  const [collapsed, setCollapsed] = useState(threadInfo?.isResolved ?? false);
+  const [resolving, setResolving] = useState(false);
+  const isResolved = threadInfo?.isResolved ?? false;
+
+  const toggleResolve = async () => {
+    if (!threadInfo) return;
+    setResolving(true);
+    try {
+      if (isResolved) {
+        await unresolveReviewThread(token, threadInfo.id);
+        onResolutionChanged?.(threadInfo.id, false);
+      } else {
+        await resolveReviewThread(token, threadInfo.id);
+        onResolutionChanged?.(threadInfo.id, true);
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setResolving(false);
+    }
+  };
 
   return (
-    <div className="border border-[var(--border)] rounded-lg overflow-hidden">
-      {/* File path + line */}
-      <div className="bg-[var(--surface)] px-3 py-1.5 text-[11px] font-mono text-[var(--muted)] border-b border-[var(--border)] flex items-center gap-2">
-        <span className="text-[var(--foreground)]">{thread.root.path}</span>
-        {thread.root.line && <span>line {thread.root.line}</span>}
+    <div className={cn(
+      "border rounded-lg overflow-hidden transition-colors",
+      isResolved ? "border-green-500/30 bg-green-500/[0.02]" : "border-border"
+    )}>
+      {/* File path + line + resolve button */}
+      <div className="bg-muted px-3 py-1.5 text-[11px] font-mono text-muted-foreground border-b border-border flex items-center gap-2">
+        <button onClick={() => setCollapsed(!collapsed)} className="flex items-center gap-1 hover:text-foreground transition-colors">
+          <svg className={cn("w-3 h-3 transition-transform", collapsed ? "" : "rotate-90")} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <span className="text-foreground truncate">{thread.root.path}</span>
+        {thread.root.line && <span className="shrink-0">line {thread.root.line}</span>}
+        <span className="text-[10px] text-muted-foreground shrink-0">{allComments.length} {allComments.length === 1 ? "comment" : "comments"}</span>
+        <div className="flex-1" />
+        {isResolved && (
+          <span className="text-[10px] text-green-600 dark:text-green-400 font-medium flex items-center gap-0.5 shrink-0">
+            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Resolved
+          </span>
+        )}
+        {threadInfo && (
+          <Button
+            variant="ghost"
+            size="xs"
+            className={cn(
+              "text-[10px] h-5 px-1.5 shrink-0",
+              isResolved ? "text-muted-foreground hover:text-amber-600" : "text-muted-foreground hover:text-green-600"
+            )}
+            onClick={toggleResolve}
+            disabled={resolving}
+          >
+            {resolving ? "..." : isResolved ? "Unresolve" : "Resolve"}
+          </Button>
+        )}
       </div>
 
-      {/* Diff hunk context */}
-      <div className="px-3 py-1 border-b border-[var(--border)] bg-[var(--background)]">
-        <DiffHunkPreview hunk={thread.root.diff_hunk} />
-      </div>
-
-      {/* Comments */}
-      <div className="px-3 py-2 space-y-2">
-        {allComments.map((c) => (
-          <div key={c.id} className="flex gap-2">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={c.user.avatar_url} alt={c.user.login} className="w-5 h-5 rounded-full shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className="text-xs font-semibold text-[var(--foreground)]">{c.user.login}</span>
-                <span className="text-[10px] text-[var(--muted)]">{timeAgo(c.created_at)}</span>
-              </div>
-              <div className="text-[13px] text-[var(--foreground)] break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                <Markdown content={c.body} />
-              </div>
-            </div>
+      {!collapsed && (
+        <>
+          {/* Diff hunk context */}
+          <div className="px-3 py-1 border-b border-border bg-background">
+            <DiffHunkPreview hunk={thread.root.diff_hunk} filename={thread.root.path} />
           </div>
-        ))}
-        <ThreadReplyForm
-          token={token}
-          repo={repo}
-          prNumber={prNumber}
-          inReplyTo={thread.root.id}
-          onPosted={onReplyPosted}
-        />
-      </div>
+
+          {/* Comments */}
+          <div className="px-3 py-2 space-y-2">
+            {allComments.map((c, i) => (
+              <div key={c.id} className={cn("flex gap-2", i > 0 && "border-t border-border/50 pt-2")}>
+                <Avatar size="sm" className="size-5 mt-0.5">
+                  <AvatarImage src={c.user.avatar_url} alt={c.user.login} />
+                  <AvatarFallback>{c.user.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+                </Avatar>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="text-xs font-semibold text-foreground">{c.user.login}</span>
+                    <span className="text-[10px] text-muted-foreground">{timeAgo(c.created_at)}</span>
+                  </div>
+                  <div className="text-[13px] text-foreground break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                    <Markdown content={c.body} />
+                  </div>
+                </div>
+              </div>
+            ))}
+            {!isResolved && (
+              <ThreadReplyForm
+                token={token}
+                repo={repo}
+                prNumber={prNumber}
+                inReplyTo={thread.root.id}
+                onPosted={onReplyPosted}
+              />
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -863,14 +1374,14 @@ function InlineDiffCommentForm({ token, repo, prNumber, path, line, commitId, on
   };
 
   return (
-    <div className="bg-[var(--surface)] border border-[var(--accent)]/30 rounded-lg px-3 py-2 my-1">
-      <textarea
+    <div className="bg-muted border border-accent/30 rounded-lg px-3 py-2 my-1">
+      <Textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Add a review comment..."
         rows={2}
         autoFocus
-        className="w-full rounded-md bg-[var(--background)] border border-[var(--border)] text-xs text-[var(--foreground)] placeholder:text-[var(--muted)] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y transition-all"
+        className="text-xs min-h-12"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
           if (e.key === "Escape") onCancel();
@@ -878,25 +1389,86 @@ function InlineDiffCommentForm({ token, repo, prNumber, path, line, commitId, on
       />
       {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
       <div className="flex items-center gap-2 mt-1.5">
-        <button
+        <Button
+          size="xs"
           onClick={submit}
           disabled={posting || !body.trim()}
-          className="px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--foreground)] text-[var(--background)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
         >
           {posting ? "Posting..." : "Add comment"}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
           onClick={onCancel}
-          className="px-2.5 py-1 rounded-md text-xs text-[var(--muted)] hover:text-[var(--foreground)] cursor-pointer"
         >
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
 
 // ── Diff View ─────────────────────────────────────────────────────
+
+const EXT_TO_LANG: Record<string, string> = {
+  js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
+  ts: "typescript", tsx: "typescript", mts: "typescript",
+  py: "python", pyx: "python",
+  yml: "yaml", yaml: "yaml",
+  json: "json", jsonc: "json",
+  go: "go",
+  sh: "bash", bash: "bash", zsh: "bash",
+  rs: "rust",
+  css: "css", scss: "css",
+  html: "xml", htm: "xml", xml: "xml", svg: "xml",
+  md: "markdown", mdx: "markdown",
+  sql: "sql",
+  dockerfile: "dockerfile",
+  nginx: "nginx", conf: "nginx",
+  toml: "yaml", ini: "yaml",
+};
+
+function langForFile(filename: string): string | null {
+  const base = filename.split("/").pop() ?? "";
+  if (base.toLowerCase() === "dockerfile") return "dockerfile";
+  const ext = base.split(".").pop()?.toLowerCase() ?? "";
+  return EXT_TO_LANG[ext] ?? null;
+}
+
+function highlightCode(code: string, lang: string | null): string {
+  if (!lang) return escapeHtml(code);
+  try {
+    return hljs.highlight(code, { language: lang }).value;
+  } catch {
+    return escapeHtml(code);
+  }
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function highlightDiffLines(lines: Array<{ content: string; type: string }>, lang: string | null): string[] {
+  if (!lang) return lines.map((l) => escapeHtml(l.content));
+  // Strip the +/- prefix, join, highlight as a block, then split back
+  const stripped = lines.map((l) => {
+    if (l.type === "hunk") return l.content;
+    return l.content.length > 0 ? l.content.slice(1) : "";
+  });
+  const block = stripped.join("\n");
+  let highlighted: string;
+  try {
+    highlighted = hljs.highlight(block, { language: lang }).value;
+  } catch {
+    return lines.map((l) => escapeHtml(l.content));
+  }
+  // Split back by newline, re-add the prefix
+  const hLines = highlighted.split("\n");
+  return lines.map((l, i) => {
+    const prefix = l.type === "hunk" ? "" : (l.content[0] ?? " ");
+    return escapeHtml(prefix) + (hLines[i] ?? "");
+  });
+}
 
 function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCommentPosted, isSeen, onToggleSeen }: {
   file: PRFile;
@@ -915,25 +1487,22 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
 
   if (!file.patch) {
     return (
-      <div className={`border border-[var(--border)] rounded-lg overflow-hidden mb-3 ${isSeen ? "opacity-50" : ""}`}>
-        <div className="flex items-center bg-[var(--surface)]">
+      <div className={cn("border border-border rounded-lg overflow-hidden mb-3", isSeen && "opacity-50")}>
+        <div className="flex items-center bg-muted">
           {onToggleSeen && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onToggleSeen(); }}
-              className={`shrink-0 w-4 h-4 ml-3 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-                isSeen ? "bg-[var(--accent)] border-[var(--accent)] text-white" : "border-[var(--border)] hover:border-[var(--accent)] text-transparent hover:text-[var(--muted)]"
-              }`}
-              title={isSeen ? "Mark as unseen" : "Mark as seen"}
-            >
-              <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </button>
+            <div className="ml-3">
+              <Checkbox
+                checked={!!isSeen}
+                onCheckedChange={() => onToggleSeen()}
+              />
+            </div>
           )}
           <button
             onClick={() => setCollapsed(!collapsed)}
-            className="flex-1 flex items-center gap-2 px-3 py-2 text-left cursor-pointer hover:bg-[var(--border)]/50 transition-colors"
+            className="flex-1 flex items-center gap-2 px-3 py-2 text-left cursor-pointer hover:bg-border/50 transition-colors"
           >
             <ChevronIcon open={!collapsed} />
-            <span className="text-xs font-mono text-[var(--foreground)] truncate flex-1">{file.filename}</span>
+            <span className="text-xs font-mono text-foreground truncate flex-1">{file.filename}</span>
             <span className="text-xs shrink-0">
               <span className="text-emerald-500">+{file.additions}</span>{" "}
               <span className="text-red-500">-{file.deletions}</span>
@@ -941,7 +1510,7 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
           </button>
         </div>
         {!collapsed && (
-          <div className="px-3 py-2 text-xs text-[var(--muted)] italic">Binary file or no patch available</div>
+          <div className="px-3 py-2 text-xs text-muted-foreground italic">Binary file or no patch available</div>
         )}
       </div>
     );
@@ -970,6 +1539,9 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
     }
   }
 
+  const lang = langForFile(file.filename);
+  const highlightedLines = React.useMemo(() => highlightDiffLines(parsed, lang), [file.patch]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Build a map of review comments by line number for this file
   const fileComments = reviewComments.filter((c) => c.path === file.filename);
   const commentsByLine = new Map<number, ReviewComment[]>();
@@ -996,33 +1568,30 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
       case "add": return "text-emerald-600 dark:text-emerald-400";
       case "del": return "text-red-600 dark:text-red-400";
       case "hunk": return "text-blue-500";
-      default: return "text-[var(--foreground)]";
+      default: return "text-foreground";
     }
   };
 
   return (
-    <div className={`border border-[var(--border)] rounded-lg overflow-hidden mb-3 ${isSeen ? "opacity-50" : ""}`}>
-      <div className="flex items-center bg-[var(--surface)]">
+    <div className={cn("border border-border rounded-lg overflow-hidden mb-3", isSeen && "opacity-50")}>
+      <div className="flex items-center bg-muted">
         {onToggleSeen && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onToggleSeen(); }}
-            className={`shrink-0 w-4 h-4 ml-3 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-              isSeen ? "bg-[var(--accent)] border-[var(--accent)] text-white" : "border-[var(--border)] hover:border-[var(--accent)] text-transparent hover:text-[var(--muted)]"
-            }`}
-            title={isSeen ? "Mark as unseen" : "Mark as seen"}
-          >
-            <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-          </button>
+          <div className="ml-3">
+            <Checkbox
+              checked={!!isSeen}
+              onCheckedChange={() => onToggleSeen()}
+            />
+          </div>
         )}
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="flex-1 flex items-center gap-2 px-3 py-2 text-left cursor-pointer hover:bg-[var(--border)]/50 transition-colors"
+          className="flex-1 flex items-center gap-2 px-3 py-2 text-left cursor-pointer hover:bg-border/50 transition-colors"
         >
           <ChevronIcon open={!collapsed} />
           <span className={`shrink-0 w-2 h-2 rounded-full ${
             file.status === "added" ? "bg-emerald-500" : file.status === "removed" ? "bg-red-500" : "bg-amber-500"
           }`} />
-          <span className="text-xs font-mono text-[var(--foreground)] truncate flex-1">{file.filename}</span>
+          <span className="text-xs font-mono text-foreground truncate flex-1">{file.filename}</span>
           <span className="text-xs shrink-0">
             <span className="text-emerald-500">+{file.additions}</span>{" "}
             <span className="text-red-500">-{file.deletions}</span>
@@ -1049,42 +1618,51 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
                       {/* Gutter with + button */}
                       <td className="w-8 text-center select-none align-top relative">
                         {showAddButton && hoveredLine === idx && (
-                          <button
-                            onClick={() => setCommentLine(lineNum)}
-                            className="absolute inset-0 flex items-center justify-center text-[var(--accent)] hover:bg-[var(--accent)]/20 rounded-sm cursor-pointer z-10"
-                            title="Add comment"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                              <path d="M12 5v14m-7-7h14" strokeLinecap="round" />
-                            </svg>
-                          </button>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <button
+                                  onClick={() => setCommentLine(lineNum)}
+                                  className="absolute inset-0 flex items-center justify-center text-primary hover:bg-primary/20 rounded-sm cursor-pointer z-10"
+                                />
+                              }
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path d="M12 5v14m-7-7h14" strokeLinecap="round" />
+                              </svg>
+                            </TooltipTrigger>
+                            <TooltipContent>Add comment</TooltipContent>
+                          </Tooltip>
                         )}
                       </td>
                       {/* Line number */}
-                      <td className="w-10 text-right pr-2 text-[var(--muted)] select-none align-top">
+                      <td className="w-10 text-right pr-2 text-muted-foreground select-none align-top">
                         {lineNum ?? ""}
                       </td>
                       {/* Content */}
-                      <td className={`px-3 whitespace-pre-wrap break-all ${textForType(line.type)}`}>
-                        {line.content}
-                      </td>
+                      <td
+                        className={`px-3 whitespace-pre-wrap break-all ${textForType(line.type)}`}
+                        dangerouslySetInnerHTML={{ __html: highlightedLines[idx] ?? escapeHtml(line.content) }}
+                      />
                     </tr>
 
                     {/* Inline comments at this line */}
                     {lineComments && lineComments.length > 0 && (
                       <tr>
                         <td colSpan={3} className="px-3 py-1">
-                          <div className="space-y-1 border-l-2 border-[var(--accent)]/30 pl-3 my-1">
+                          <div className="space-y-1 border-l-2 border-accent/30 pl-3 my-1">
                             {lineComments.map((c) => (
-                              <div key={c.id} className="flex gap-2 bg-[var(--surface)] rounded-md px-2 py-1.5">
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={c.user.avatar_url} alt={c.user.login} className="w-4 h-4 rounded-full shrink-0 mt-0.5" />
+                              <div key={c.id} className="flex gap-2 bg-muted rounded-md px-2 py-1.5">
+                                <Avatar size="sm" className="size-4 mt-0.5">
+                                  <AvatarImage src={c.user.avatar_url} alt={c.user.login} />
+                                  <AvatarFallback>{c.user.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+                                </Avatar>
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-1.5 mb-0.5">
-                                    <span className="text-[11px] font-semibold text-[var(--foreground)]">{c.user.login}</span>
-                                    <span className="text-[10px] text-[var(--muted)]">{timeAgo(c.created_at)}</span>
+                                    <span className="text-[11px] font-semibold text-foreground">{c.user.login}</span>
+                                    <span className="text-[10px] text-muted-foreground">{timeAgo(c.created_at)}</span>
                                   </div>
-                                  <div className="text-[12px] text-[var(--foreground)] break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                                  <div className="text-[12px] text-foreground break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
                                     <Markdown content={c.body} />
                                   </div>
                                 </div>
@@ -1128,141 +1706,619 @@ function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCom
 
 // ── Side Panel ─────────────────────────────────────────────────────
 
-// ── Seen Toolbar ──────────────────────────────────────────────────
+// ── Conflict File View ────────────────────────────────────────────
 
-function SeenToolbar({ seenCount, totalCount, showSeen, onToggleShowSeen, onMarkAllSeen, label }: {
-  seenCount: number;
-  totalCount: number;
-  showSeen: boolean;
-  onToggleShowSeen: () => void;
-  onMarkAllSeen: () => void;
-  label: string;
-}) {
-  const unseenCount = totalCount - seenCount;
-  if (totalCount === 0) return null;
+function ConflictFileView({ file, baseRef, headRef }: { file: ConflictFile; baseRef: string; headRef: string }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [view, setView] = useState<"side-by-side" | "base" | "head">("side-by-side");
+
+  const baseLines = file.baseContent.split("\n");
+  const headLines = file.headContent.split("\n");
+  const maxLines = Math.max(baseLines.length, headLines.length);
+
+  // Simple line-by-line diff: find lines that differ
+  const diffLines = Array.from({ length: maxLines }, (_, i) => ({
+    base: baseLines[i] ?? "",
+    head: headLines[i] ?? "",
+    differs: (baseLines[i] ?? "") !== (headLines[i] ?? ""),
+    baseExists: i < baseLines.length,
+    headExists: i < headLines.length,
+  }));
 
   return (
-    <div className="flex items-center gap-2 mb-3 text-xs">
-      <span className="text-[var(--muted)]">
-        {unseenCount} unseen{seenCount > 0 && ` · ${seenCount} seen`}
-      </span>
-      <div className="flex-1" />
-      {seenCount > 0 && (
-        <button
-          onClick={onToggleShowSeen}
-          className="text-[var(--accent)] hover:underline cursor-pointer"
-        >
-          {showSeen ? `Hide seen ${label}` : `Show seen ${label} (${seenCount})`}
-        </button>
-      )}
-      {unseenCount > 0 && (
-        <button
-          onClick={onMarkAllSeen}
-          className="text-[var(--muted)] hover:text-[var(--foreground)] cursor-pointer"
-        >
-          Mark all seen
-        </button>
+    <div className="border border-border rounded-lg overflow-hidden">
+      <div className="flex items-center bg-muted">
+        <Button variant="ghost" size="sm" onClick={() => setCollapsed(!collapsed)} className="flex-1 justify-start gap-2 rounded-none font-mono text-xs h-9">
+          <ChevronIcon open={!collapsed} />
+          <AlertIcon />
+          <span className="truncate">{file.filename}</span>
+        </Button>
+        {!collapsed && (
+          <div className="flex items-center gap-0.5 mr-2 bg-background rounded-md p-0.5">
+            {([["side-by-side", "Split"], ["base", baseRef], ["head", headRef]] as const).map(([v, label]) => (
+              <Button
+                key={v}
+                variant={view === v ? "secondary" : "ghost"}
+                size="sm"
+                className="text-[10px] h-6 px-2"
+                onClick={() => setView(v)}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {!collapsed && (
+        <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+          {view === "side-by-side" ? (
+            <div className="flex divide-x divide-border min-w-[600px]">
+              {/* Base side */}
+              <div className="flex-1 min-w-0">
+                <div className="bg-muted px-2 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border sticky top-0 z-10">{baseRef}</div>
+                <pre className="text-[11px] font-mono leading-[1.7]">
+                  {diffLines.map((line, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "px-2 flex",
+                        line.differs && line.baseExists ? "bg-red-500/10" : "",
+                        !line.baseExists ? "bg-muted/30" : ""
+                      )}
+                    >
+                      <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{line.baseExists ? i + 1 : ""}</span>
+                      <span className={cn("flex-1 whitespace-pre-wrap break-all", line.differs ? "text-red-600 dark:text-red-400" : "text-foreground")}>
+                        {line.baseExists ? line.base : ""}
+                      </span>
+                    </div>
+                  ))}
+                </pre>
+              </div>
+              {/* Head side */}
+              <div className="flex-1 min-w-0">
+                <div className="bg-muted px-2 py-1 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border sticky top-0 z-10">{headRef}</div>
+                <pre className="text-[11px] font-mono leading-[1.7]">
+                  {diffLines.map((line, i) => (
+                    <div
+                      key={i}
+                      className={cn(
+                        "px-2 flex",
+                        line.differs && line.headExists ? "bg-emerald-500/10" : "",
+                        !line.headExists ? "bg-muted/30" : ""
+                      )}
+                    >
+                      <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{line.headExists ? i + 1 : ""}</span>
+                      <span className={cn("flex-1 whitespace-pre-wrap break-all", line.differs ? "text-emerald-600 dark:text-emerald-400" : "text-foreground")}>
+                        {line.headExists ? line.head : ""}
+                      </span>
+                    </div>
+                  ))}
+                </pre>
+              </div>
+            </div>
+          ) : (
+            <pre className="text-[11px] font-mono leading-[1.7]">
+              {(view === "base" ? baseLines : headLines).map((line, i) => (
+                <div key={i} className="px-2 flex">
+                  <span className="w-8 text-right pr-2 text-muted-foreground select-none shrink-0">{i + 1}</span>
+                  <span className="flex-1 whitespace-pre-wrap break-all text-foreground">{line}</span>
+                </div>
+              ))}
+            </pre>
+          )}
+        </div>
       )}
     </div>
   );
 }
 
-// ── Seen state helpers ─────────────────────────────────────────────
+// ── Label Editor ──────────────────────────────────────────────────
 
-interface SeenState {
-  commentIds: number[];
-  filePaths: string[];
+function LabelEditor({
+  currentLabels,
+  token,
+  repo,
+  prNumber,
+  onLabelsChanged,
+}: {
+  currentLabels: Array<{ name: string; color: string }>;
+  token: string;
+  repo: string;
+  prNumber: number;
+  onLabelsChanged: (labels: Array<{ name: string; color: string }>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [repoLabels, setRepoLabels] = useState<RepoLabel[] | null>(null);
+  const [search, setSearch] = useState("");
+  const [updating, setUpdating] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (open && !repoLabels) {
+      fetchRepoLabels(token, repo).then(setRepoLabels).catch(() => setRepoLabels([]));
+    }
+  }, [open, repoLabels, token, repo]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const currentNames = new Set(currentLabels.map((l) => l.name));
+
+  const toggleLabel = async (label: RepoLabel) => {
+    setUpdating(label.name);
+    try {
+      if (currentNames.has(label.name)) {
+        await removeLabel(token, repo, prNumber, label.name);
+        onLabelsChanged(currentLabels.filter((l) => l.name !== label.name));
+      } else {
+        await addLabels(token, repo, prNumber, [label.name]);
+        onLabelsChanged([...currentLabels, { name: label.name, color: label.color }]);
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const filtered = repoLabels?.filter((l) =>
+    !search || l.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="relative inline-block" ref={containerRef}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-6 px-1.5 text-[10px] text-muted-foreground gap-1"
+        onClick={() => setOpen(!open)}
+      >
+        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path d="M7 7h.01M7 3h5a1.99 1.99 0 011.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        Edit
+      </Button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 z-50 w-56 bg-popover border border-border rounded-lg shadow-lg overflow-hidden">
+          <div className="p-2 border-b border-border">
+            <Input
+              type="text"
+              placeholder="Filter labels..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="h-7 text-xs"
+              autoFocus
+            />
+          </div>
+          <div className="max-h-48 overflow-y-auto p-1">
+            {!repoLabels ? (
+              <div className="p-2 text-xs text-muted-foreground text-center">Loading...</div>
+            ) : filtered && filtered.length === 0 ? (
+              <div className="p-2 text-xs text-muted-foreground text-center">No labels found</div>
+            ) : (
+              filtered?.map((label) => {
+                const active = currentNames.has(label.name);
+                const isUpdating = updating === label.name;
+                return (
+                  <button
+                    key={label.name}
+                    className={cn(
+                      "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-left hover:bg-accent transition-colors cursor-pointer",
+                      isUpdating && "opacity-50 pointer-events-none"
+                    )}
+                    onClick={() => toggleLabel(label)}
+                  >
+                    <Checkbox checked={active} className="pointer-events-none" />
+                    <span
+                      className="w-3 h-3 rounded-full shrink-0"
+                      style={{ backgroundColor: `#${label.color}` }}
+                    />
+                    <span className="truncate flex-1">{label.name}</span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
-function getSeenKey(repo: string, number: number) {
-  return `gh-seen-${repo}-${number}`;
+// ── Quick Actions ─────────────────────────────────────────────────
+
+function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string; onRefresh: () => void }) {
+  const [action, setAction] = useState<"request_changes" | "merge" | "close" | null>(null);
+  const [body, setBody] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const doApprove = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await submitReview(token, pr.repo, pr.number, "APPROVE");
+      setSuccess("Approved!");
+      setTimeout(() => { setSuccess(null); onRefresh(); }, 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const doSubmit = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      if (action === "request_changes") {
+        if (!body.trim()) { setError("Body required"); setLoading(false); return; }
+        await submitReview(token, pr.repo, pr.number, "REQUEST_CHANGES", body);
+        setSuccess("Changes requested!");
+      } else if (action === "merge") {
+        await mergePR(token, pr.repo, pr.number, "squash");
+        setSuccess("Merged!");
+      } else if (action === "close") {
+        if (body.trim()) {
+          await postComment(token, pr.repo, pr.number, body);
+        }
+        await closePR(token, pr.repo, pr.number);
+        setSuccess("Closed!");
+      }
+      setBody("");
+      setTimeout(() => { setSuccess(null); setAction(null); onRefresh(); }, 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="flex items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger render={<Button variant="outline" size="xs" className="text-[11px] h-6 gap-0.5 px-1.5" onClick={doApprove} disabled={loading} />}>
+            <CheckIcon /> Approve
+          </TooltipTrigger>
+          <TooltipContent>Approve this PR</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger render={
+            <Button
+              variant={action === "request_changes" ? "default" : "outline"}
+              size="xs"
+              className="text-[11px] h-6 gap-0.5 px-1.5"
+              onClick={() => setAction(action === "request_changes" ? null : "request_changes")}
+            />
+          }>
+            <XIcon /> Changes
+          </TooltipTrigger>
+          <TooltipContent>Request changes</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger render={
+            <Button
+              variant={action === "merge" ? "default" : "outline"}
+              size="xs"
+              className="text-[11px] h-6 gap-0.5 px-1.5"
+              onClick={() => setAction(action === "merge" ? null : "merge")}
+            />
+          }>
+            <MergeIcon /> Merge
+          </TooltipTrigger>
+          <TooltipContent>Squash and merge</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger render={
+            <Button
+              variant={action === "close" ? "destructive" : "outline"}
+              size="xs"
+              className="text-[11px] h-6 gap-0.5 px-1.5"
+              onClick={() => setAction(action === "close" ? null : "close")}
+            />
+          }>
+            <CircleXIcon /> Close
+          </TooltipTrigger>
+          <TooltipContent>Close this PR</TooltipContent>
+        </Tooltip>
+        {success && <span className="text-[11px] text-emerald-500 ml-1">{success}</span>}
+        {error && <span className="text-[11px] text-red-500 ml-1">{error}</span>}
+      </div>
+      {action === "request_changes" && (
+        <div className="flex gap-2">
+          <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="What needs to change?" rows={2} className="text-xs flex-1" />
+          <div className="flex flex-col gap-1">
+            <Button size="sm" onClick={doSubmit} disabled={loading} className="text-xs">{loading ? "..." : "Submit"}</Button>
+            <Button variant="ghost" size="sm" onClick={() => setAction(null)} className="text-xs">Cancel</Button>
+          </div>
+        </div>
+      )}
+      {action === "merge" && (
+        <div className="flex items-center gap-2">
+          <Button size="sm" onClick={doSubmit} disabled={loading} className="text-xs">{loading ? "Merging..." : "Confirm squash merge"}</Button>
+          <Button variant="ghost" size="sm" onClick={() => setAction(null)} className="text-xs">Cancel</Button>
+        </div>
+      )}
+      {action === "close" && (
+        <div className="flex gap-2">
+          <Textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Leave a comment (optional)..." rows={2} className="text-xs flex-1" />
+          <div className="flex flex-col gap-1">
+            <Button size="sm" variant="destructive" onClick={doSubmit} disabled={loading} className="text-xs">{loading ? "Closing..." : "Close PR"}</Button>
+            <Button variant="ghost" size="sm" onClick={() => setAction(null)} className="text-xs">Cancel</Button>
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
-function loadSeen(repo: string, number: number): SeenState {
-  try {
-    const raw = localStorage.getItem(getSeenKey(repo, number));
-    if (raw) return JSON.parse(raw);
-  } catch { /* ignore */ }
-  return { commentIds: [], filePaths: [] };
+function CommentsTab({ threadResolution, issueComments, threads, totalComments, token, pr, findThreadInfo, handleResolutionChanged, handleReviewCommentPosted, onIssueCommentPosted }: {
+  threadResolution: ThreadResolution | null;
+  issueComments: PRComment[] | null;
+  threads: { root: ReviewComment; replies: ReviewComment[] }[];
+  totalComments: number;
+  token: string;
+  pr: DashboardPR;
+  findThreadInfo: (root: ReviewComment) => ReviewThreadInfo | undefined;
+  handleResolutionChanged: (threadId: string, resolved: boolean) => void;
+  handleReviewCommentPosted: (c: ReviewComment) => void;
+  onIssueCommentPosted: (c: PRComment) => void;
+}) {
+  const [threadFilter, setThreadFilter] = useState<"all" | "unresolved" | "resolved">("all");
+  const [resolvingAll, setResolvingAll] = useState(false);
+
+  const unresolvedThreads = threadResolution?.threads.filter((t) => !t.isResolved) ?? [];
+  const resolvedThreads = threadResolution?.threads.filter((t) => t.isResolved) ?? [];
+
+  const filteredThreads = threads.filter((thread) => {
+    if (threadFilter === "all") return true;
+    const info = findThreadInfo(thread.root);
+    if (!info) return threadFilter === "unresolved"; // default to showing if no info
+    return threadFilter === "resolved" ? info.isResolved : !info.isResolved;
+  });
+
+  const resolveAll = async () => {
+    setResolvingAll(true);
+    try {
+      await Promise.all(
+        unresolvedThreads.map((t) => resolveReviewThread(token, t.id).then(() => handleResolutionChanged(t.id, true)))
+      );
+    } catch { /* ignore */ }
+    setResolvingAll(false);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Thread resolution summary */}
+      {threadResolution && threadResolution.totalThreads > 0 && (
+        <div className={cn(
+          "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium",
+          threadResolution.resolvedThreads === threadResolution.totalThreads
+            ? "bg-green-500/10 text-green-600 dark:text-green-400"
+            : "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        )}>
+          <svg className="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            {threadResolution.resolvedThreads === threadResolution.totalThreads ? (
+              <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" />
+            ) : (
+              <path d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" strokeLinecap="round" strokeLinejoin="round" />
+            )}
+          </svg>
+          <span className="flex-1">
+            {threadResolution.resolvedThreads === threadResolution.totalThreads
+              ? `All ${threadResolution.totalThreads} review threads resolved`
+              : `${threadResolution.resolvedThreads} of ${threadResolution.totalThreads} review threads resolved`
+            }
+          </span>
+          {unresolvedThreads.length > 0 && (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-[10px] h-5 px-2 text-amber-600 dark:text-amber-400 hover:text-green-600"
+              onClick={resolveAll}
+              disabled={resolvingAll}
+            >
+              {resolvingAll ? "Resolving..." : `Resolve all (${unresolvedThreads.length})`}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Issue comments (general PR comments) */}
+      {issueComments && issueComments.length > 0 && (
+        <div className="space-y-0">
+          <div className="relative">
+            {/* Timeline line */}
+            <div className="absolute left-[15px] top-4 bottom-4 w-px bg-border" />
+            {issueComments.map((c) => (
+              <div key={c.id} className="relative flex gap-3 py-2">
+                <div className="relative z-10 shrink-0">
+                  <Avatar size="sm" className="size-[30px] ring-2 ring-background">
+                    <AvatarImage src={c.user.avatar_url} alt={c.user.login} />
+                    <AvatarFallback>{c.user.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+                  </Avatar>
+                </div>
+                <div className="flex-1 min-w-0 bg-muted rounded-lg px-3 py-2 border border-border/50">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-semibold text-foreground">{c.user.login}</span>
+                    <span className="text-[10px] text-muted-foreground">{timeAgo(c.created_at)}</span>
+                    <a href={c.html_url} target="_blank" rel="noopener noreferrer" className="ml-auto text-[10px] text-muted-foreground hover:text-primary transition-colors">
+                      view on GitHub
+                    </a>
+                  </div>
+                  <div className="text-[13px] text-foreground break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                    <Markdown content={c.body} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Review comment threads */}
+      {threads.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 mt-2">
+            <Separator className="flex-1" />
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Review threads</span>
+            <Separator className="flex-1" />
+          </div>
+
+          {/* Filter pills */}
+          {threadResolution && threadResolution.totalThreads > 0 && (
+            <div className="flex items-center gap-1">
+              {(["all", "unresolved", "resolved"] as const).map((f) => {
+                const count = f === "all" ? threads.length : f === "unresolved" ? unresolvedThreads.length : resolvedThreads.length;
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setThreadFilter(f)}
+                    className={cn(
+                      "text-[10px] px-2 py-0.5 rounded-full transition-colors capitalize",
+                      threadFilter === f
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {f} ({count})
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {filteredThreads.map((thread) => (
+            <ReviewThread
+              key={thread.root.id}
+              thread={thread}
+              token={token}
+              repo={pr.repo}
+              prNumber={pr.number}
+              onReplyPosted={handleReviewCommentPosted}
+              threadInfo={findThreadInfo(thread.root)}
+              onResolutionChanged={handleResolutionChanged}
+            />
+          ))}
+          {filteredThreads.length === 0 && (
+            <p className="text-xs text-muted-foreground italic text-center py-2">
+              No {threadFilter} threads
+            </p>
+          )}
+        </div>
+      )}
+
+      {totalComments === 0 && <p className="text-xs text-muted-foreground italic">No comments</p>}
+
+      {/* Issue comment form */}
+      <CommentForm
+        token={token}
+        repo={pr.repo}
+        number={pr.number}
+        onPosted={onIssueCommentPosted}
+      />
+    </div>
+  );
 }
 
-function saveSeen(repo: string, number: number, state: SeenState) {
-  try {
-    localStorage.setItem(getSeenKey(repo, number), JSON.stringify(state));
-  } catch { /* ignore */ }
-}
-
-function SidePanel({ pr, token, onClose }: { pr: DashboardPR; token: string; onClose: () => void }) {
+function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: string; onClose: () => void; onRefresh: () => void }) {
   const [files, setFiles] = useState<PRFile[] | null>(null);
   const [issueComments, setIssueComments] = useState<PRComment[] | null>(null);
   const [reviewComments, setReviewComments] = useState<ReviewComment[] | null>(null);
   const [onDevelop, setOnDevelop] = useState<"yes" | "no" | "no-branch" | null>(null);
+  const [prLabels, setPrLabels] = useState(pr.labels);
+  const [commits, setCommits] = useState<PRCommit[] | null>(null);
+  const [conflictFiles, setConflictFiles] = useState<ConflictFile[] | null>(null);
+  const [conflictsLoading, setConflictsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"description" | "files" | "review" | "comments">("description");
-  const [seen, setSeen] = useState<SeenState>(() => loadSeen(pr.repo, pr.number));
-  const [showSeen, setShowSeen] = useState(true);
-
-  const seenCommentIds = new Set(seen.commentIds);
-  const seenFilePaths = new Set(seen.filePaths);
-
-  const updateSeen = (next: SeenState) => {
-    setSeen(next);
-    saveSeen(pr.repo, pr.number, next);
-  };
-
-  const markCommentSeen = (id: number) => {
-    if (seenCommentIds.has(id)) return;
-    updateSeen({ ...seen, commentIds: [...seen.commentIds, id] });
-  };
-
-  const markFileSeen = (path: string) => {
-    if (seenFilePaths.has(path)) return;
-    updateSeen({ ...seen, filePaths: [...seen.filePaths, path] });
-  };
-
-  const markCommentUnseen = (id: number) => {
-    updateSeen({ ...seen, commentIds: seen.commentIds.filter((i) => i !== id) });
-  };
-
-  const markFileUnseen = (path: string) => {
-    updateSeen({ ...seen, filePaths: seen.filePaths.filter((p) => p !== path) });
-  };
-
-  const markAllCommentsSeen = () => {
-    const allIds = [
-      ...(issueComments ?? []).map((c) => c.id),
-      ...(reviewComments ?? []).map((c) => c.id),
-    ];
-    updateSeen({ ...seen, commentIds: [...new Set([...seen.commentIds, ...allIds])] });
-  };
-
-  const markAllFilesSeen = () => {
-    const allPaths = (files ?? []).map((f) => f.filename);
-    updateSeen({ ...seen, filePaths: [...new Set([...seen.filePaths, ...allPaths])] });
-  };
-
+  const [tab, setTab] = useState<"description" | "changes" | "comments" | "commits" | "ci" | "conflicts">("description");
+  const [checkRuns, setCheckRuns] = useState<CheckRun[] | null>(null);
+  const [checkRunsLoading, setCheckRunsLoading] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
+  const [threadResolution, setThreadResolution] = useState<ThreadResolution | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchThreadResolutions(token, pr.repo, pr.number).then((res) => {
+      if (!cancelled) setThreadResolution(res);
+    });
+    return () => { cancelled = true; };
+  }, [token, pr.repo, pr.number]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setTab("description");
     setOnDevelop(null);
-    setSeen(loadSeen(pr.repo, pr.number));
-    setShowSeen(true);
     Promise.allSettled([
       fetchPRFiles(token, pr.repo, pr.number),
       fetchIssueComments(token, pr.repo, pr.number),
       fetchReviewComments(token, pr.repo, pr.number),
       checkOnDevelop(token, pr.repo, pr.headSha),
-    ]).then(([f, ic, rc, d]) => {
+      fetchPRCommits(token, pr.repo, pr.number),
+    ]).then(([f, ic, rc, d, cm]) => {
       if (cancelled) return;
       setFiles(f.status === "fulfilled" ? f.value : []);
       setIssueComments(ic.status === "fulfilled" ? ic.value : []);
       setReviewComments(rc.status === "fulfilled" ? rc.value : []);
       setOnDevelop(d.status === "fulfilled" ? d.value : null);
+      setCommits(cm.status === "fulfilled" ? cm.value : []);
       setLoading(false);
     });
     return () => { cancelled = true; };
   }, [token, pr.repo, pr.number, pr.headSha]);
+
+  // Lazy-load conflict files when the tab is opened
+  useEffect(() => {
+    if (tab !== "conflicts" || conflictFiles !== null || !pr.hasConflicts || !pr.baseRef || !pr.headRef) return;
+    let cancelled = false;
+    setConflictsLoading(true);
+    fetchConflictFiles(token, pr.repo, pr.number, pr.baseRef, pr.headRef).then((cf) => {
+      if (cancelled) return;
+      setConflictFiles(cf);
+      setConflictsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [tab, conflictFiles, token, pr.repo, pr.number, pr.hasConflicts, pr.baseRef, pr.headRef]);
+
+  // Lazy-load check runs when the CI tab is opened
+  useEffect(() => {
+    if (tab !== "ci" || checkRuns !== null || !pr.headSha) return;
+    let cancelled = false;
+    setCheckRunsLoading(true);
+    fetchCheckRuns(token, pr.repo, pr.headSha).then((runs) => {
+      if (cancelled) return;
+      setCheckRuns(runs);
+      setCheckRunsLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setCheckRuns([]);
+      setCheckRunsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [tab, checkRuns, token, pr.repo, pr.headSha]);
+
+  const handleRerunFailed = async () => {
+    if (!pr.headSha) return;
+    setRerunning(true);
+    try {
+      await rerunFailedChecks(token, pr.repo, pr.headSha);
+      // Refresh check runs after a brief delay
+      setTimeout(() => {
+        setCheckRuns(null); // triggers re-fetch
+      }, 2000);
+    } catch { /* ignore */ }
+    setRerunning(false);
+  };
 
   const totalComments = (issueComments?.length ?? 0) + (reviewComments?.length ?? 0);
 
@@ -1272,291 +2328,401 @@ function SidePanel({ pr, token, onClose }: { pr: DashboardPR; token: string; onC
     setReviewComments((prev) => prev ? [...prev, c] : [c]);
   };
 
-  const tabs = [
-    { id: "description" as const, label: "Description" },
-    { id: "files" as const, label: `Files${files ? ` (${files.length})` : ""}` },
-    { id: "review" as const, label: "Review" },
-    { id: "comments" as const, label: `Comments${totalComments > 0 ? ` (${totalComments})` : ""}` },
-  ];
+  const findThreadInfo = (root: ReviewComment): ReviewThreadInfo | undefined => {
+    if (!threadResolution) return undefined;
+    return threadResolution.threads.find((t) =>
+      t.path === root.path && (t.line === root.line || t.originalLine === root.original_line)
+    );
+  };
+
+  const handleResolutionChanged = (threadId: string, resolved: boolean) => {
+    setThreadResolution((prev) => {
+      if (!prev) return prev;
+      const updated = prev.threads.map((t) => t.id === threadId ? { ...t, isResolved: resolved } : t);
+      return {
+        ...prev,
+        threads: updated,
+        resolvedThreads: updated.filter((t) => t.isResolved).length,
+      };
+    });
+  };
 
   return (
-    <div className="h-full flex flex-col bg-[var(--card)] border-l border-[var(--border)]">
+    <div className="h-full flex flex-col bg-card border-l border-border">
       {/* Panel header */}
-      <div className="shrink-0 px-4 py-3 border-b border-[var(--border)]">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <span className="text-xs text-[var(--muted)] font-mono">{pr.repo}#{pr.number}</span>
-              {pr.isDraft && <span className="text-[9px] uppercase tracking-wider font-semibold px-1 rounded bg-[var(--surface)] text-[var(--muted)]">Draft</span>}
-              <ReviewBadge state={pr.reviewState} />
-            </div>
-            <h2 className="text-base font-semibold text-[var(--foreground)] leading-snug">{pr.title}</h2>
-            <div className="flex items-center gap-2 mt-1.5">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={pr.authorAvatar} alt={pr.author} className="w-5 h-5 rounded-full" />
-              <span className="text-xs text-[var(--muted)]">{pr.author}</span>
-              <span className="text-xs text-[var(--muted)]">&middot; {timeAgo(pr.updatedAt)}</span>
-            </div>
-          </div>
-          <button onClick={onClose} className="p-1 rounded-md hover:bg-[var(--surface)] text-[var(--muted)] hover:text-[var(--foreground)] transition-colors cursor-pointer shrink-0">
+      <div className="shrink-0 px-4 py-2 border-b border-border space-y-1.5">
+        {/* Row 1: title + close */}
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] text-muted-foreground font-mono shrink-0">{pr.repo.split("/")[1]}#{pr.number}</span>
+          <h2 className="text-sm font-semibold text-foreground leading-snug truncate flex-1">{pr.title}</h2>
+          <Button variant="ghost" size="icon-xs" onClick={onClose} className="shrink-0">
             <XIcon />
-          </button>
+          </Button>
         </div>
 
-        {/* Status bar */}
-        <div className="flex items-center gap-3 mt-3 flex-wrap">
+        {/* Row 2: meta + status + actions — all inline */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <Avatar size="sm" className="size-4">
+            <AvatarImage src={pr.authorAvatar} alt={pr.author} />
+            <AvatarFallback>{pr.author.slice(0, 2).toUpperCase()}</AvatarFallback>
+          </Avatar>
+          <span className="text-[11px] text-muted-foreground">{pr.author}</span>
+          <span className="text-[11px] text-muted-foreground">{timeAgo(pr.updatedAt)}</span>
+          {pr.headRef && (
+            <>
+              <code className="bg-muted px-1 py-0.5 rounded font-mono text-[10px] text-muted-foreground truncate max-w-[150px]" title={pr.headRef}>{pr.headRef}</code>
+              {pr.baseRef && (
+                <>
+                  <span className="text-[10px] text-muted-foreground">&rarr;</span>
+                  <code className="bg-muted px-1 py-0.5 rounded font-mono text-[10px] text-muted-foreground">{pr.baseRef}</code>
+                </>
+              )}
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button variant="ghost" size="icon" className="h-4 w-4 shrink-0" onClick={() => navigator.clipboard.writeText(pr.headRef)} />
+                  }
+                >
+                  <CopyIcon />
+                </TooltipTrigger>
+                <TooltipContent>Copy branch</TooltipContent>
+              </Tooltip>
+            </>
+          )}
           <CIBadge status={pr.ciStatus} />
+          {pr.isDraft && <Badge variant="secondary" className="text-[9px] uppercase tracking-wider font-semibold px-1 py-0 h-auto">Draft</Badge>}
+          <ReviewBadge state={pr.reviewState} />
           {pr.hasConflicts && (
-            <div className="flex items-center gap-1 text-red-500">
-              <AlertIcon />
-              <span className="text-xs">Conflicts</span>
-            </div>
+            <Badge variant="destructive" className="text-[9px] px-1 py-0 h-auto gap-0.5">
+              <AlertIcon /> Conflicts
+            </Badge>
           )}
           {onDevelop === "yes" && (
-            <div className="flex items-center gap-1 text-emerald-500">
-              <CheckIcon />
-              <span className="text-xs font-medium">On develop</span>
-            </div>
+            <Badge variant="outline" className="text-[9px] px-1 py-0 h-auto text-emerald-500 gap-0.5">
+              <CheckIcon /> On develop
+            </Badge>
           )}
-          {onDevelop === "no" && (
-            <div className="flex items-center gap-1 text-amber-500">
-              <ClockIcon />
-              <span className="text-xs font-medium">Not on develop</span>
-            </div>
-          )}
-          {pr.labels.map((label) => (
+          {prLabels.map((label) => (
             <span
               key={label.name}
-              className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
+              className="text-[9px] font-medium px-1 py-0 rounded-full"
               style={{ backgroundColor: `#${label.color}20`, color: `#${label.color}`, border: `1px solid #${label.color}30` }}
             >
               {label.name}
             </span>
           ))}
-          <a
-            href={pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto text-xs font-medium text-[var(--accent)] hover:underline"
-          >
+          <LabelEditor currentLabels={prLabels} token={token} repo={pr.repo} prNumber={pr.number} onLabelsChanged={setPrLabels} />
+          <a href={pr.url} target="_blank" rel="noopener noreferrer" className="ml-auto text-[11px] font-medium text-primary hover:underline shrink-0">
             Open on GitHub
           </a>
         </div>
 
-        {/* Tabs */}
-        <div className="flex gap-1 mt-3">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                tab === t.id
-                  ? "bg-[var(--foreground)] text-[var(--background)]"
-                  : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--surface)]"
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
+        {/* Row 3: quick actions */}
+        <div className="flex items-center gap-1.5">
+          <QuickActions pr={pr} token={token} onRefresh={onRefresh} />
         </div>
+
+        {/* Row 4: tabs */}
+        <Tabs
+          value={tab}
+          onValueChange={(v) => setTab(v as typeof tab)}
+        >
+          <TabsList>
+            <TabsTrigger value="description">Description</TabsTrigger>
+            <TabsTrigger value="changes">Changes{files ? ` (${files.length})` : ""}</TabsTrigger>
+            <TabsTrigger value="comments">
+              Comments{totalComments > 0 ? ` (${totalComments})` : ""}
+              {threadResolution && threadResolution.totalThreads > 0 && (
+                <span className={cn(
+                  "ml-1 text-[9px] font-medium px-1 rounded-full",
+                  threadResolution.resolvedThreads === threadResolution.totalThreads
+                    ? "bg-green-500/10 text-green-500"
+                    : "bg-amber-500/10 text-amber-500"
+                )}>
+                  {threadResolution.resolvedThreads}/{threadResolution.totalThreads}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="commits">Commits{commits ? ` (${commits.length})` : ""}</TabsTrigger>
+            <TabsTrigger value="ci">CI/CD</TabsTrigger>
+            {pr.hasConflicts && (
+              <TabsTrigger value="conflicts" className="text-destructive">Conflicts</TabsTrigger>
+            )}
+          </TabsList>
+        </Tabs>
       </div>
 
       {/* Panel content */}
-      <div className="flex-1 overflow-y-auto px-5 py-4">
-        {loading ? (
-          <div className="space-y-3 animate-pulse">
-            <div className="h-3 w-3/4 bg-[var(--surface)] rounded" />
-            <div className="h-3 w-1/2 bg-[var(--surface)] rounded" />
-            <div className="h-3 w-2/3 bg-[var(--surface)] rounded" />
-            <div className="h-3 w-1/3 bg-[var(--surface)] rounded" />
-          </div>
-        ) : (
-          <>
-            {tab === "description" && (
-              <div className="text-sm text-[var(--foreground)] break-words prose-gh [&>*:first-child]:mt-0">
-                {pr.body ? <Markdown content={pr.body} /> : <span className="text-[var(--muted)] italic">No description</span>}
-              </div>
-            )}
+      <ScrollArea className="flex-1 overflow-hidden">
+        <div key={tab} className="px-5 py-4 animate-fade-in">
+          {loading ? (
+            <div className="space-y-3 stagger-children">
+              <div className="h-3 w-3/4 skeleton-shimmer rounded" />
+              <div className="h-3 w-1/2 skeleton-shimmer rounded" />
+              <div className="h-3 w-2/3 skeleton-shimmer rounded" />
+              <div className="h-3 w-1/3 skeleton-shimmer rounded" />
+            </div>
+          ) : (
+            <>
+              {tab === "description" && (
+                <div className="text-sm text-foreground break-words prose-gh [&>*:first-child]:mt-0">
+                  {pr.body ? <Markdown content={pr.body} /> : <span className="text-muted-foreground italic">No description</span>}
+                </div>
+              )}
 
-            {tab === "files" && files && (
-              <div>
-                <SeenToolbar
-                  seenCount={files.filter((f) => seenFilePaths.has(f.filename)).length}
-                  totalCount={files.length}
-                  showSeen={showSeen}
-                  onToggleShowSeen={() => setShowSeen(!showSeen)}
-                  onMarkAllSeen={markAllFilesSeen}
-                  label="files"
+              {tab === "changes" && files && (
+                <div className="space-y-0">
+                  {files.map((f) => (
+                    <DiffView
+                      key={f.filename}
+                      file={f}
+                      reviewComments={reviewComments ?? []}
+                      token={token}
+                      repo={pr.repo}
+                      prNumber={pr.number}
+                      commitId={pr.headSha}
+                      onCommentPosted={handleReviewCommentPosted}
+                      isSeen={false}
+                      onToggleSeen={() => {}}
+                    />
+                  ))}
+                  {files.length === 0 && <p className="text-xs text-muted-foreground italic">No files changed</p>}
+                </div>
+              )}
+
+              {tab === "comments" && (
+                <CommentsTab
+                  threadResolution={threadResolution}
+                  issueComments={issueComments}
+                  threads={threads}
+                  totalComments={totalComments}
+                  token={token}
+                  pr={pr}
+                  findThreadInfo={findThreadInfo}
+                  handleResolutionChanged={handleResolutionChanged}
+                  handleReviewCommentPosted={handleReviewCommentPosted}
+                  onIssueCommentPosted={(c) => setIssueComments((prev) => prev ? [...prev, c] : [c])}
                 />
-                <div className="space-y-0.5">
-                  {files.map((f) => {
-                    const isSeen = seenFilePaths.has(f.filename);
-                    if (isSeen && !showSeen) return null;
-                    return (
-                      <div key={f.filename} className={`flex items-center gap-2 py-1.5 text-xs font-mono border-b border-[var(--border)]/50 last:border-0 group ${isSeen ? "opacity-50" : ""}`}>
-                        <button
-                          onClick={() => isSeen ? markFileUnseen(f.filename) : markFileSeen(f.filename)}
-                          className={`shrink-0 w-4 h-4 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-                            isSeen
-                              ? "bg-[var(--accent)] border-[var(--accent)] text-white"
-                              : "border-[var(--border)] hover:border-[var(--accent)] text-transparent hover:text-[var(--muted)]"
-                          }`}
-                          title={isSeen ? "Mark as unseen" : "Mark as seen"}
+              )}
+
+              {tab === "commits" && commits && (
+                <div className="space-y-0">
+                  {commits.length === 0 ? (
+                    <p className="text-xs text-muted-foreground italic">No commits</p>
+                  ) : (
+                    <div className="relative">
+                      {/* Timeline line */}
+                      <div className="absolute left-[15px] top-4 bottom-4 w-px bg-border" />
+                      {commits.map((commit, i) => {
+                        const firstLine = commit.commit.message.split("\n")[0];
+                        const rest = commit.commit.message.split("\n").slice(1).join("\n").trim();
+                        return (
+                          <div key={commit.sha} className="relative flex gap-3 py-2 group">
+                            {/* Timeline dot */}
+                            <div className="relative z-10 mt-1 shrink-0">
+                              {commit.author ? (
+                                <Avatar size="sm" className="size-[30px] ring-2 ring-background">
+                                  <AvatarImage src={commit.author.avatar_url} alt={commit.author.login} />
+                                  <AvatarFallback>{commit.author.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+                                </Avatar>
+                              ) : (
+                                <div className="size-[30px] rounded-full bg-muted ring-2 ring-background flex items-center justify-center">
+                                  <span className="text-[10px] text-muted-foreground">{commit.commit.author.name.slice(0, 2).toUpperCase()}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0 pt-0.5">
+                              <a
+                                href={commit.html_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-sm font-medium text-foreground hover:text-primary hover:underline leading-snug line-clamp-2"
+                              >
+                                {firstLine}
+                              </a>
+                              {rest && (
+                                <pre className="mt-1 text-[11px] text-muted-foreground font-mono whitespace-pre-wrap line-clamp-3">{rest}</pre>
+                              )}
+                              <div className="flex items-center gap-2 mt-1">
+                                <span className="text-[10px] text-muted-foreground">
+                                  {commit.author?.login ?? commit.commit.author.name}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground">{timeAgo(commit.commit.author.date)}</span>
+                                <code className="text-[10px] text-muted-foreground font-mono bg-muted px-1 py-0.5 rounded">{commit.sha.slice(0, 7)}</code>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {tab === "ci" && (
+                <div className="space-y-3">
+                  {checkRunsLoading ? (
+                    <div className="space-y-3 stagger-children">
+                      {[1, 2, 3, 4].map((i) => (
+                        <div key={i} className="flex items-center gap-3">
+                          <div className="w-4 h-4 skeleton-shimmer rounded-full" />
+                          <div className="h-3 flex-1 skeleton-shimmer rounded" />
+                          <div className="h-3 w-16 skeleton-shimmer rounded" />
+                        </div>
+                      ))}
+                    </div>
+                  ) : checkRuns && checkRuns.length > 0 ? (
+                    <>
+                      {/* Summary bar */}
+                      <div className="flex items-center gap-3 pb-2 border-b border-border">
+                        <div className="flex items-center gap-1.5 text-xs">
+                          <span className="flex items-center gap-1 text-emerald-500">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                            {checkRuns.filter((r) => r.conclusion === "success" || r.conclusion === "skipped" || r.conclusion === "neutral").length} passed
+                          </span>
+                          {checkRuns.some((r) => r.conclusion === "failure" || r.conclusion === "timed_out") && (
+                            <span className="flex items-center gap-1 text-red-500">
+                              <span className="w-2 h-2 rounded-full bg-red-500" />
+                              {checkRuns.filter((r) => r.conclusion === "failure" || r.conclusion === "timed_out").length} failed
+                            </span>
+                          )}
+                          {checkRuns.some((r) => r.status !== "completed") && (
+                            <span className="flex items-center gap-1 text-amber-500">
+                              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                              {checkRuns.filter((r) => r.status !== "completed").length} running
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex-1" />
+                        {checkRuns.some((r) => r.conclusion === "failure" || r.conclusion === "timed_out") && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={rerunning}
+                            onClick={handleRerunFailed}
+                            className="text-xs h-7"
+                          >
+                            {rerunning ? "Re-running..." : "Re-run failed"}
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setCheckRuns(null)}
+                          className="text-xs h-7"
                         >
-                          <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                        </button>
-                        <span className={`shrink-0 w-2 h-2 rounded-full ${
-                          f.status === "added" ? "bg-emerald-500" : f.status === "removed" ? "bg-red-500" : "bg-amber-500"
-                        }`} />
-                        <span className="text-[var(--foreground)] truncate flex-1">{f.filename}</span>
-                        <span className="shrink-0">
-                          <span className="text-emerald-500">+{f.additions}</span>{" "}
-                          <span className="text-red-500">-{f.deletions}</span>
+                          Refresh
+                        </Button>
+                      </div>
+
+                      {/* Check runs list */}
+                      {checkRuns
+                        .sort((a, b) => {
+                          // Failed first, then running, then passed
+                          const order = (r: CheckRun) =>
+                            r.conclusion === "failure" || r.conclusion === "timed_out" ? 0
+                            : r.status !== "completed" ? 1
+                            : 2;
+                          return order(a) - order(b);
+                        })
+                        .map((run) => (
+                        <a
+                          key={run.id}
+                          href={run.html_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border hover:bg-muted/50 transition-colors group/ci"
+                        >
+                          {/* Status icon */}
+                          <span className="shrink-0">
+                            {run.status !== "completed" ? (
+                              <span className="flex w-4 h-4 items-center justify-center">
+                                <span className="w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                              </span>
+                            ) : run.conclusion === "success" ? (
+                              <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            ) : run.conclusion === "failure" || run.conclusion === "timed_out" ? (
+                              <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            ) : run.conclusion === "skipped" ? (
+                              <svg className="w-4 h-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            ) : (
+                              <span className="w-4 h-4 flex items-center justify-center">
+                                <span className="w-2.5 h-2.5 rounded-full bg-muted-foreground/40" />
+                              </span>
+                            )}
+                          </span>
+
+                          {/* Name and app */}
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium text-foreground truncate group-hover/ci:text-primary transition-colors">
+                              {run.name}
+                            </p>
+                            {run.app && (
+                              <p className="text-[11px] text-muted-foreground truncate">{run.app.name}</p>
+                            )}
+                          </div>
+
+                          {/* Duration */}
+                          <span className="text-[11px] text-muted-foreground shrink-0">
+                            {run.started_at && run.completed_at
+                              ? formatDuration(new Date(run.completed_at).getTime() - new Date(run.started_at).getTime())
+                              : run.started_at
+                                ? "running..."
+                                : "queued"}
+                          </span>
+
+                          {/* External link indicator */}
+                          <svg className="w-3 h-3 text-muted-foreground opacity-0 group-hover/ci:opacity-100 transition-opacity shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </a>
+                      ))}
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      {!pr.headSha ? "No head SHA available" : "No check runs found for this PR."}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {tab === "conflicts" && pr.hasConflicts && (
+                <div className="space-y-4">
+                  {conflictsLoading ? (
+                    <div className="space-y-3 stagger-children">
+                      <div className="h-3 w-3/4 skeleton-shimmer rounded" />
+                      <div className="h-3 w-1/2 skeleton-shimmer rounded" />
+                      <div className="h-20 w-full skeleton-shimmer rounded" />
+                    </div>
+                  ) : conflictFiles && conflictFiles.length > 0 ? (
+                    <>
+                      <div className="flex items-center gap-2 text-sm">
+                        <Badge variant="destructive" className="text-[10px]">{conflictFiles.length} conflicting file{conflictFiles.length > 1 ? "s" : ""}</Badge>
+                        <span className="text-xs text-muted-foreground">
+                          Files modified in both <code className="bg-muted px-1 py-0.5 rounded text-[11px] font-mono">{pr.baseRef}</code> and <code className="bg-muted px-1 py-0.5 rounded text-[11px] font-mono">{pr.headRef}</code>
                         </span>
                       </div>
-                    );
-                  })}
-                  {files.length === 0 && <p className="text-xs text-[var(--muted)] italic">No files changed</p>}
+                      {conflictFiles.map((cf) => (
+                        <ConflictFileView key={cf.filename} file={cf} baseRef={pr.baseRef} headRef={pr.headRef} />
+                      ))}
+                    </>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      {conflictFiles ? "Could not determine conflicting files." : "Loading conflict information..."}
+                    </p>
+                  )}
                 </div>
-              </div>
-            )}
-
-            {tab === "review" && files && reviewComments && (
-              <div>
-                <SeenToolbar
-                  seenCount={files.filter((f) => seenFilePaths.has(f.filename)).length}
-                  totalCount={files.length}
-                  showSeen={showSeen}
-                  onToggleShowSeen={() => setShowSeen(!showSeen)}
-                  onMarkAllSeen={markAllFilesSeen}
-                  label="files"
-                />
-                <div className="space-y-0">
-                  {files.map((f) => {
-                    const isSeen = seenFilePaths.has(f.filename);
-                    if (isSeen && !showSeen) return null;
-                    return (
-                      <DiffView
-                        key={f.filename}
-                        file={f}
-                        reviewComments={reviewComments}
-                        token={token}
-                        repo={pr.repo}
-                        prNumber={pr.number}
-                        commitId={pr.headSha}
-                        onCommentPosted={handleReviewCommentPosted}
-                        isSeen={isSeen}
-                        onToggleSeen={() => isSeen ? markFileUnseen(f.filename) : markFileSeen(f.filename)}
-                      />
-                    );
-                  })}
-                  {files.length === 0 && <p className="text-xs text-[var(--muted)] italic">No files changed</p>}
-                </div>
-              </div>
-            )}
-
-            {tab === "comments" && (
-              <div className="space-y-4">
-                <SeenToolbar
-                  seenCount={[...(issueComments ?? []), ...(reviewComments ?? [])].filter((c) => seenCommentIds.has(c.id)).length}
-                  totalCount={totalComments}
-                  showSeen={showSeen}
-                  onToggleShowSeen={() => setShowSeen(!showSeen)}
-                  onMarkAllSeen={markAllCommentsSeen}
-                  label="comments"
-                />
-
-                {/* Issue comments (general PR comments) */}
-                {issueComments && issueComments.length > 0 && (
-                  <div className="space-y-3">
-                    {issueComments.map((c) => {
-                      const isSeen = seenCommentIds.has(c.id);
-                      if (isSeen && !showSeen) return null;
-                      return (
-                        <div key={c.id} className={`flex gap-2.5 group ${isSeen ? "opacity-50" : ""}`}>
-                          <button
-                            onClick={() => isSeen ? markCommentUnseen(c.id) : markCommentSeen(c.id)}
-                            className={`shrink-0 w-4 h-4 mt-1 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-                              isSeen
-                                ? "bg-[var(--accent)] border-[var(--accent)] text-white"
-                                : "border-[var(--border)] hover:border-[var(--accent)] text-transparent hover:text-[var(--muted)]"
-                            }`}
-                            title={isSeen ? "Mark as unseen" : "Mark as seen"}
-                          >
-                            <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                          </button>
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={c.user.avatar_url} alt={c.user.login} className="w-6 h-6 rounded-full shrink-0 mt-0.5" />
-                          <div className="flex-1 min-w-0 bg-[var(--surface)] rounded-lg px-3 py-2">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-xs font-semibold text-[var(--foreground)]">{c.user.login}</span>
-                              <span className="text-[10px] text-[var(--muted)]">{timeAgo(c.created_at)}</span>
-                            </div>
-                            <div className="text-[13px] text-[var(--foreground)] break-words prose-gh [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                              <Markdown content={c.body} />
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* Review comment threads */}
-                {threads.length > 0 && (
-                  <div className="space-y-3">
-                    {issueComments && issueComments.length > 0 && (
-                      <div className="flex items-center gap-2 mt-2">
-                        <div className="flex-1 h-px bg-[var(--border)]" />
-                        <span className="text-[10px] text-[var(--muted)] uppercase tracking-wider font-medium">Review threads</span>
-                        <div className="flex-1 h-px bg-[var(--border)]" />
-                      </div>
-                    )}
-                    {threads.map((thread) => {
-                      const threadSeen = seenCommentIds.has(thread.root.id);
-                      if (threadSeen && !showSeen) return null;
-                      return (
-                        <div key={thread.root.id} className={`relative ${threadSeen ? "opacity-50" : ""}`}>
-                          <button
-                            onClick={() => threadSeen ? markCommentUnseen(thread.root.id) : markCommentSeen(thread.root.id)}
-                            className={`absolute -left-0.5 top-2 z-10 w-4 h-4 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-                              threadSeen
-                                ? "bg-[var(--accent)] border-[var(--accent)] text-white"
-                                : "border-[var(--border)] hover:border-[var(--accent)] text-transparent hover:text-[var(--muted)]"
-                            }`}
-                            title={threadSeen ? "Mark as unseen" : "Mark as seen"}
-                          >
-                            <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                          </button>
-                          <div className="ml-5">
-                            <ReviewThread
-                              thread={thread}
-                              token={token}
-                              repo={pr.repo}
-                              prNumber={pr.number}
-                              onReplyPosted={handleReviewCommentPosted}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {totalComments === 0 && <p className="text-xs text-[var(--muted)] italic">No comments</p>}
-
-                {/* Issue comment form */}
-                <CommentForm
-                  token={token}
-                  repo={pr.repo}
-                  number={pr.number}
-                  onPosted={(c) => setIssueComments((prev) => prev ? [...prev, c] : [c])}
-                />
-              </div>
-            )}
-          </>
-        )}
-      </div>
+              )}
+            </>
+          )}
+        </div>
+      </ScrollArea>
     </div>
   );
 }
@@ -1569,46 +2735,46 @@ function Markdown({ content }: { content: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeRaw]}
+      rehypePlugins={[rehypeRaw, rehypeHighlight]}
       components={{
         a: ({ ...props }) => (
-          <a {...props} target="_blank" rel="noopener noreferrer" className="text-[var(--accent)] hover:underline break-all" />
+          <a {...props} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline break-all" />
         ),
         code: ({ className, children, ...props }) => {
           const isBlock = className?.startsWith("language-");
           return isBlock ? (
-            <pre className="bg-[var(--surface)] border border-[var(--border)] rounded-lg px-4 py-3 overflow-x-auto my-4 text-[13px] leading-relaxed font-mono">
+            <pre className="bg-muted border border-border rounded-lg px-4 py-3 overflow-x-auto my-4 text-[13px] leading-relaxed font-mono">
               <code className={className} {...props}>{children}</code>
             </pre>
           ) : (
-            <code className="bg-[var(--surface)] border border-[var(--border)] px-1.5 py-0.5 rounded-md text-[13px] font-mono" {...props}>{children}</code>
+            <code className="bg-muted border border-border px-1.5 py-0.5 rounded-md text-[13px] font-mono" {...props}>{children}</code>
           );
         },
         pre: ({ children }) => <>{children}</>,
         img: ({ alt, ...props }) => (
           // eslint-disable-next-line @next/next/no-img-element
-          <img alt={alt ?? ""} {...props} className="max-w-full rounded-lg my-3 border border-[var(--border)]" />
+          <img alt={alt ?? ""} {...props} className="max-w-full rounded-lg my-3 border border-border" />
         ),
         table: ({ ...props }) => (
-          <div className="overflow-x-auto my-4 rounded-lg border border-[var(--border)]">
+          <div className="overflow-x-auto my-4 rounded-lg border border-border">
             <table className="text-[13px] w-full" {...props} />
           </div>
         ),
-        th: ({ ...props }) => <th className="border-b border-[var(--border)] px-3 py-2 bg-[var(--surface)] text-left text-xs font-semibold" {...props} />,
-        td: ({ ...props }) => <td className="border-b border-[var(--border)] px-3 py-2" {...props} />,
+        th: ({ ...props }) => <th className="border-b border-border px-3 py-2 bg-muted text-left text-xs font-semibold" {...props} />,
+        td: ({ ...props }) => <td className="border-b border-border px-3 py-2" {...props} />,
         ul: ({ ...props }) => <ul className="list-disc pl-6 my-3 space-y-1.5" {...props} />,
         ol: ({ ...props }) => <ol className="list-decimal pl-6 my-3 space-y-1.5" {...props} />,
         li: ({ ...props }) => <li className="leading-relaxed" {...props} />,
         blockquote: ({ ...props }) => (
-          <blockquote className="border-l-[3px] border-[var(--border)] pl-4 my-4 text-[var(--muted)]" {...props} />
+          <blockquote className="border-l-[3px] border-border pl-4 my-4 text-muted-foreground" {...props} />
         ),
-        h1: ({ ...props }) => <h1 className="text-xl font-semibold mt-6 mb-3 pb-2 border-b border-[var(--border)]" {...props} />,
-        h2: ({ ...props }) => <h2 className="text-lg font-semibold mt-5 mb-2 pb-1.5 border-b border-[var(--border)]" {...props} />,
+        h1: ({ ...props }) => <h1 className="text-xl font-semibold mt-6 mb-3 pb-2 border-b border-border" {...props} />,
+        h2: ({ ...props }) => <h2 className="text-lg font-semibold mt-5 mb-2 pb-1.5 border-b border-border" {...props} />,
         h3: ({ ...props }) => <h3 className="text-base font-semibold mt-4 mb-2" {...props} />,
         h4: ({ ...props }) => <h4 className="text-sm font-semibold mt-3 mb-1.5" {...props} />,
         p: ({ ...props }) => <p className="my-3 leading-relaxed" {...props} />,
-        hr: () => <hr className="border-[var(--border)] my-6" />,
-        input: ({ ...props }) => <input {...props} disabled className="mr-2 accent-[var(--accent)] align-middle" />,
+        hr: () => <Separator className="my-6" />,
+        input: ({ ...props }) => <input {...props} disabled className="mr-2 accent-primary align-middle" />,
         strong: ({ ...props }) => <strong className="font-semibold" {...props} />,
       }}
     >
@@ -1640,27 +2806,28 @@ function CommentForm({ token, repo, number, onPosted }: { token: string; repo: s
   };
 
   return (
-    <div className="border-t border-[var(--border)] pt-4 mt-2">
-      <textarea
+    <div className="pt-4 mt-2">
+      <Separator className="mb-4" />
+      <Textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder="Leave a comment..."
         rows={3}
-        className="w-full rounded-lg bg-[var(--surface)] border border-[var(--border)] text-xs text-[var(--foreground)] placeholder:text-[var(--muted)] px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[var(--accent)] focus:border-transparent resize-y transition-all"
+        className="text-xs"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
         }}
       />
       {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
       <div className="flex items-center justify-between mt-2">
-        <span className="text-[10px] text-[var(--muted)]">Markdown supported &middot; {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter to submit</span>
-        <button
+        <span className="text-[10px] text-muted-foreground">Markdown supported &middot; {navigator.platform?.includes("Mac") ? "\u2318" : "Ctrl"}+Enter to submit</span>
+        <Button
+          size="sm"
           onClick={submit}
           disabled={posting || !body.trim()}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--foreground)] text-[var(--background)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-all cursor-pointer"
         >
           {posting ? "Posting..." : "Comment"}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1670,11 +2837,11 @@ function CommentForm({ token, repo, number, onPosted }: { token: string; repo: s
 
 function SkeletonCard() {
   return (
-    <div className="rounded-xl bg-[var(--card)] border border-[var(--border)] border-l-[3px] border-l-transparent px-3 py-2.5 flex items-center gap-3 animate-pulse">
-      <div className="w-7 h-7 rounded-full bg-[var(--surface)]" />
+    <div className="rounded-xl bg-card border border-border border-l-[3px] border-l-transparent px-3 py-2.5 flex items-center gap-3">
+      <div className="w-7 h-7 rounded-full skeleton-shimmer" />
       <div className="flex-1 space-y-1.5">
-        <div className="h-4 w-3/4 bg-[var(--surface)] rounded" />
-        <div className="h-3 w-1/3 bg-[var(--surface)] rounded" />
+        <div className="h-4 w-3/4 skeleton-shimmer rounded" />
+        <div className="h-3 w-1/3 skeleton-shimmer rounded" />
       </div>
     </div>
   );
@@ -1682,28 +2849,68 @@ function SkeletonCard() {
 
 // ── PR Group ───────────────────────────────────────────────────────
 
+function urgencyScore(pr: DashboardPR): number {
+  let score = 0;
+  if (pr.ciStatus === "failure") score += 100;
+  if (pr.hasConflicts) score += 80;
+  if (pr.reviewState === "changes_requested") score += 60;
+  // Stale review request (>24h since updated)
+  const hoursSinceUpdate = (Date.now() - new Date(pr.updatedAt).getTime()) / 3600000;
+  if (pr.reviewRequestedFromMe && hoursSinceUpdate > 24) score += 40;
+  // Older PRs float up
+  const daysSinceCreated = (Date.now() - new Date(pr.createdAt).getTime()) / 86400000;
+  if (daysSinceCreated > 7) score += 20;
+  if (daysSinceCreated > 14) score += 20;
+  return score;
+}
+
 function PRGroup({
   title,
   prs,
   selectedId,
   onSelect,
+  seenIds,
+  onToggleSeen,
   defaultOpen = true,
+  batchMode,
+  batchSelected,
+  onBatchToggle,
 }: {
   title: string;
   prs: DashboardPR[];
   selectedId: number | null;
   onSelect: (pr: DashboardPR) => void;
+  seenIds: Set<string>;
+  onToggleSeen: (pr: DashboardPR) => void;
   defaultOpen?: boolean;
+  batchMode: boolean;
+  batchSelected: Set<number>;
+  onBatchToggle: (pr: DashboardPR) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  // Only animate stagger on first expand, not on re-renders from state changes (e.g. toggling seen)
+  const hasExpandedRef = useRef(defaultOpen);
 
-  const categoryColors: Record<string, string> = {
-    "Needs My Attention": "bg-red-500/10 text-red-500",
-    "Waiting on Others": "bg-amber-500/10 text-amber-500",
-    Other: "bg-[var(--surface)] text-[var(--muted)]",
+  const categoryBadgeVariant: Record<string, "destructive" | "outline" | "secondary"> = {
+    "Needs My Attention": "destructive",
+    "Waiting on Others": "outline",
+    Other: "secondary",
   };
 
-  const badgeColor = categoryColors[title] ?? "bg-[var(--surface)] text-[var(--muted)]";
+  const variant = categoryBadgeVariant[title] ?? "secondary";
+  const isAttention = title === "Needs My Attention";
+
+  const sorted = [...prs].sort((a, b) => {
+    const aSeen = seenIds.has(`${a.repo}#${a.number}`);
+    const bSeen = seenIds.has(`${b.repo}#${b.number}`);
+    if (aSeen !== bSeen) return aSeen ? 1 : -1;
+    // Priority sort for "Needs Attention"
+    if (isAttention) {
+      const urgDiff = urgencyScore(b) - urgencyScore(a);
+      if (urgDiff !== 0) return urgDiff;
+    }
+    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  });
 
   return (
     <section>
@@ -1712,20 +2919,32 @@ function PRGroup({
         className="w-full flex items-center gap-2 py-2 px-1 cursor-pointer"
       >
         <ChevronIcon open={open} />
-        <h2 className="text-sm font-semibold text-[var(--foreground)]">{title}</h2>
-        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badgeColor}`}>
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+        <Badge variant={variant}>
           {prs.length}
-        </span>
+        </Badge>
       </button>
-      {open && (
-        <div className="space-y-1.5 pb-3">
-          {prs
-            .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-            .map((pr) => (
-              <PRCard key={pr.id} pr={pr} selected={pr.id === selectedId} onSelect={() => onSelect(pr)} />
-            ))}
+      {open && (() => {
+        const shouldAnimate = !hasExpandedRef.current;
+        hasExpandedRef.current = true;
+        return (
+        <div className={cn("space-y-1.5 pb-3", shouldAnimate && "stagger-children")}>
+          {sorted.map((pr) => (
+            <PRCard
+              key={pr.id}
+              pr={pr}
+              selected={pr.id === selectedId}
+              seen={seenIds.has(`${pr.repo}#${pr.number}`)}
+              onSelect={() => onSelect(pr)}
+              onToggleSeen={() => onToggleSeen(pr)}
+              batchMode={batchMode}
+              batchSelected={batchSelected.has(pr.id)}
+              onBatchToggle={() => onBatchToggle(pr)}
+            />
+          ))}
         </div>
-      )}
+        );
+      })()}
     </section>
   );
 }
@@ -1734,13 +2953,13 @@ function PRGroup({
 
 function EmptyState({ hasFilters }: { hasFilters: boolean }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 gap-4">
+    <div className="flex flex-col items-center justify-center py-20 gap-4 animate-fade-in-up">
       <InboxIcon />
       <div className="text-center space-y-1">
-        <p className="text-sm font-medium text-[var(--foreground)]">
+        <p className="text-sm font-medium text-foreground">
           {hasFilters ? "No PRs match your filters" : "No open pull requests"}
         </p>
-        <p className="text-xs text-[var(--muted)]">
+        <p className="text-xs text-muted-foreground">
           {hasFilters ? "Try adjusting your filters or search terms" : "You're all caught up!"}
         </p>
       </div>
@@ -1753,91 +2972,583 @@ function EmptyState({ hasFilters }: { hasFilters: boolean }) {
 interface DashboardProps {
   token: string;
   onDisconnect: () => void;
+  theme: Theme;
+  setTheme: (t: Theme) => void;
 }
 
-export function Dashboard({ token, onDisconnect }: DashboardProps) {
-  const { prs, user, loading, enriching, error, refresh, lastRefreshed } = usePRs(token);
-  const { filters, setFilter, filteredPRs, groupedPRs, availableRepos, availableAuthors } =
+function ResizeHandle({ onResize }: { onResize: (delta: number) => void }) {
+  const dragging = useRef(false);
+  const lastX = useRef(0);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      e.preventDefault();
+      const delta = e.clientX - lastX.current;
+      lastX.current = e.clientX;
+      onResize(delta);
+    };
+    const handleMouseUp = () => {
+      if (dragging.current) {
+        dragging.current = false;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+    };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [onResize]);
+
+  return (
+    <div
+      className="w-1 shrink-0 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors relative group"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        dragging.current = true;
+        lastX.current = e.clientX;
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      }}
+    >
+      <div className="absolute inset-y-0 -left-1 -right-1" />
+    </div>
+  );
+}
+
+// ── Keyboard Shortcut Help ─────────────────────────────────────────
+
+function KeyboardShortcutHelp({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) return null;
+  const shortcuts = [
+    { key: "j / ↓", desc: "Next PR" },
+    { key: "k / ↑", desc: "Previous PR" },
+    { key: "Enter", desc: "Open selected PR" },
+    { key: "Esc", desc: "Close panel" },
+    { key: "n", desc: "Jump to next unseen PR" },
+    { key: "s", desc: "Toggle seen on selected PR" },
+    { key: "r", desc: "Refresh" },
+    { key: "?", desc: "Toggle this help" },
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={onClose}>
+      <div className="bg-card border border-border rounded-xl shadow-2xl p-6 max-w-sm w-full animate-scale-in" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-2"><KeyboardIcon /> Keyboard shortcuts</h3>
+          <Button variant="ghost" size="icon-xs" onClick={onClose}><XIcon /></Button>
+        </div>
+        <div className="space-y-1.5">
+          {shortcuts.map((s) => (
+            <div key={s.key} className="flex items-center justify-between py-1">
+              <span className="text-xs text-muted-foreground">{s.desc}</span>
+              <kbd className="text-[11px] font-mono bg-muted px-2 py-0.5 rounded border border-border">{s.key}</kbd>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Notification Manager ──────────────────────────────────────────
+
+function useNotifications(prs: DashboardPR[], enabled: boolean) {
+  const prevPRsRef = useRef<Map<string, DashboardPR>>(new Map());
+
+  useEffect(() => {
+    if (!enabled || !("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || Notification.permission !== "granted") return;
+
+    const prev = prevPRsRef.current;
+    if (prev.size === 0) {
+      // First load — populate without notifying
+      const map = new Map<string, DashboardPR>();
+      for (const pr of prs) map.set(`${pr.repo}#${pr.number}`, pr);
+      prevPRsRef.current = map;
+      return;
+    }
+
+    for (const pr of prs) {
+      const key = `${pr.repo}#${pr.number}`;
+      const old = prev.get(key);
+      if (!old) continue;
+
+      if (pr.category === "needs_attention" && old.category !== "needs_attention") {
+        new Notification(`PR needs attention: ${pr.title}`, {
+          body: `${pr.repo}#${pr.number} — moved to "Needs Attention"`,
+          icon: pr.authorAvatar,
+        });
+      }
+    }
+
+    const map = new Map<string, DashboardPR>();
+    for (const pr of prs) map.set(`${pr.repo}#${pr.number}`, pr);
+    prevPRsRef.current = map;
+  }, [prs, enabled]);
+}
+
+// ── Activity Tracker ────────────────────────────────────────────────
+
+function ActivityTracker({ token, username, org }: { token: string; username: string; org: string | null }) {
+  const [activity, setActivity] = useState<DailyActivity | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<"reviews" | "comments" | "merges" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchDailyActivity(token, username, org).then((data) => {
+      if (!cancelled) { setActivity(data); setLoading(false); }
+    }).catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [token, username, org]);
+
+  if (loading) {
+    return (
+      <div className="px-4 py-2 border-b border-border">
+        <div className="flex items-center gap-3">
+          <div className="h-4 w-20 skeleton-shimmer rounded" />
+          <div className="flex gap-2">
+            {[1, 2, 3].map((i) => <div key={i} className="h-6 w-14 skeleton-shimmer rounded-full" />)}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!activity) return null;
+
+  const stats = [
+    { key: "reviews" as const, label: "Reviews", count: activity.reviewsSubmitted.length, color: "text-blue-500", bg: "bg-blue-500/10" },
+    { key: "comments" as const, label: "Comments", count: activity.commentsMade.length, color: "text-amber-500", bg: "bg-amber-500/10" },
+    { key: "merges" as const, label: "Merged", count: activity.prsMerged.length, color: "text-green-500", bg: "bg-green-500/10" },
+  ];
+
+  const total = stats.reduce((s, x) => s + x.count, 0);
+
+  return (
+    <div className="border-b border-border">
+      <div className="px-4 py-2 flex items-center gap-3">
+        <span className="text-xs font-medium text-muted-foreground">Today</span>
+        <div className="flex items-center gap-1.5">
+          {stats.map((s) => (
+            <button
+              key={s.key}
+              onClick={() => setExpanded(expanded === s.key ? null : s.key)}
+              className={cn(
+                "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition-colors",
+                expanded === s.key ? `${s.bg} ${s.color}` : "bg-muted text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <span className={s.color}>{s.count}</span>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        {total === 0 && <span className="text-xs text-muted-foreground">No activity yet</span>}
+      </div>
+      {expanded && (
+        <div className="px-4 pb-2 max-h-48 overflow-y-auto animate-fade-in-down">
+          <div className="space-y-1 stagger-children">
+            {expanded === "reviews" && activity.reviewsSubmitted.map((r, i) => (
+              <a key={i} href={r.url} target="_blank" rel="noopener noreferrer" className="block text-xs py-1 px-2 rounded hover:bg-muted transition-colors">
+                <span className="text-foreground">{r.prTitle}</span>
+                <span className="text-muted-foreground ml-1.5">{r.repo}#{r.prNumber}</span>
+                <span className={cn("ml-1.5", r.state === "APPROVED" ? "text-green-500" : r.state === "CHANGES_REQUESTED" ? "text-red-500" : "text-muted-foreground")}>{r.state.toLowerCase().replace("_", " ")}</span>
+              </a>
+            ))}
+            {expanded === "comments" && activity.commentsMade.map((c, i) => (
+              <a key={i} href={c.url} target="_blank" rel="noopener noreferrer" className="block text-xs py-1 px-2 rounded hover:bg-muted transition-colors">
+                <span className="text-foreground">{c.prTitle}</span>
+                <span className="text-muted-foreground ml-1.5">{c.repo}#{c.prNumber}</span>
+              </a>
+            ))}
+            {expanded === "merges" && activity.prsMerged.map((m, i) => (
+              <a key={i} href={m.url} target="_blank" rel="noopener noreferrer" className="block text-xs py-1 px-2 rounded hover:bg-muted transition-colors">
+                <span className="text-foreground">{m.prTitle}</span>
+                <span className="text-muted-foreground ml-1.5">{m.repo}#{m.prNumber}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function useDeferredValue<T>(value: T, delay: number): { current: T; isOpen: boolean } {
+  const [deferred, setDeferred] = useState(value);
+  const [isOpen, setIsOpen] = useState(!!value);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (value) {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      setDeferred(value);
+      // RAF to ensure the DOM renders before triggering the transition
+      requestAnimationFrame(() => setIsOpen(true));
+    } else {
+      setIsOpen(false);
+      timeoutRef.current = setTimeout(() => setDeferred(value), delay);
+    }
+    return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
+  }, [value, delay]);
+
+  return { current: deferred || value, isOpen: !!value };
+}
+
+export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardProps) {
+  const [org, setOrg] = useLocalStorage<string | null>("gh-dashboard-org", null);
+  const [orgs, setOrgs] = useState<Array<{ login: string; avatar_url: string }>>([]);
+  const { prs, user, loading, enriching, error, refresh, lastRefreshed } = usePRs(token, org);
+
+  // Fetch user orgs on mount
+  useEffect(() => {
+    fetchUserOrgs(token).then(setOrgs).catch(() => setOrgs([]));
+  }, [token]);
+  const { filters, setFilter, filteredPRs, groupedPRs, availableRepos, availableAuthors, availableLabels } =
     useFilters(prs);
   const [selectedPR, setSelectedPR] = useState<DashboardPR | null>(null);
-  const [theme, setTheme] = useTheme();
+  const panel = useDeferredValue(selectedPR, 350);
+  // theme and setTheme are passed as props from page level
+  const [leftWidth, setLeftWidth] = useState(420);
+  const [seenIds, setSeenIds] = useState<Set<string>>(() => {
+    const map = loadPRSeenMap();
+    const ids = new Set<string>();
+    for (const key of Object.keys(map)) ids.add(key);
+    return ids;
+  });
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchSelected, setBatchSelected] = useState<Set<number>>(new Set());
+
+  const handleBatchToggle = useCallback((pr: DashboardPR) => {
+    setBatchSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(pr.id)) next.delete(pr.id);
+      else next.add(pr.id);
+      return next;
+    });
+  }, []);
+
+  const batchMarkSeen = useCallback(() => {
+    for (const pr of prs) {
+      if (batchSelected.has(pr.id)) markPRSeen(pr);
+    }
+    setSeenIds((prev) => {
+      const next = new Set(prev);
+      for (const pr of prs) {
+        if (batchSelected.has(pr.id)) next.add(`${pr.repo}#${pr.number}`);
+      }
+      return next;
+    });
+    setBatchSelected(new Set());
+    setBatchMode(false);
+  }, [prs, batchSelected]);
+
+  const batchSelectAll = useCallback(() => {
+    setBatchSelected(new Set(filteredPRs.map((pr) => pr.id)));
+  }, [filteredPRs]);
+
+  const batchSelectNone = useCallback(() => {
+    setBatchSelected(new Set());
+  }, []);
+
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    try { return localStorage.getItem("gh-notifications") === "true"; } catch { return false; }
+  });
+  const handleResize = useCallback((delta: number) => {
+    setLeftWidth((w) => Math.max(300, Math.min(800, w + delta)));
+  }, []);
+
+  // Notifications
+  useNotifications(prs, notificationsEnabled);
+
+  const toggleNotifications = useCallback(() => {
+    setNotificationsEnabled((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("gh-notifications", String(next)); } catch { /* ignore */ }
+      if (next && "Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission();
+      }
+      return next;
+    });
+  }, []);
+
+  // Compute which PRs are actually "seen" (not updated since last viewed)
+  const seenPRIds = React.useMemo(() => {
+    const result = new Set<string>();
+    const map = loadPRSeenMap();
+    for (const pr of prs) {
+      const key = `${pr.repo}#${pr.number}`;
+      const lastSeen = map[key];
+      if (lastSeen && new Date(lastSeen).getTime() >= new Date(pr.updatedAt).getTime()) {
+        result.add(key);
+      }
+    }
+    return result;
+  }, [prs, seenIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Flat list of all visible PRs for keyboard navigation
+  const flatPRList = React.useMemo(() => {
+    const result: DashboardPR[] = [];
+    for (const [, groupPRs] of groupedPRs.entries()) {
+      const sorted = [...groupPRs].sort((a, b) => {
+        const aSeen = seenPRIds.has(`${a.repo}#${a.number}`);
+        const bSeen = seenPRIds.has(`${b.repo}#${b.number}`);
+        if (aSeen !== bSeen) return aSeen ? 1 : -1;
+        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      });
+      result.push(...sorted);
+    }
+    return result;
+  }, [groupedPRs, seenPRIds]);
+
+  const handleSelectPR = useCallback((pr: DashboardPR) => {
+    setSelectedPR(pr);
+  }, []);
+
+  const handleToggleSeen = useCallback((pr: DashboardPR) => {
+    const key = `${pr.repo}#${pr.number}`;
+    const map = loadPRSeenMap();
+    const isSeen = map[key] && new Date(map[key]).getTime() >= new Date(pr.updatedAt).getTime();
+    if (isSeen) {
+      unmarkPRSeen(pr);
+      setSeenIds((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    } else {
+      markPRSeen(pr);
+      setSeenIds((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
+    }
+  }, []);
+
+  // Bulk mark all visible PRs as seen
+  const markAllSeen = useCallback(() => {
+    for (const pr of filteredPRs) {
+      markPRSeen(pr);
+    }
+    setSeenIds((prev) => {
+      const next = new Set(prev);
+      for (const pr of filteredPRs) next.add(`${pr.repo}#${pr.number}`);
+      return next;
+    });
+  }, [filteredPRs]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't capture if typing in an input/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const currentIndex = selectedPR ? flatPRList.findIndex((p) => p.id === selectedPR.id) : -1;
+
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const next = Math.min(currentIndex + 1, flatPRList.length - 1);
+        if (flatPRList[next]) setSelectedPR(flatPRList[next]);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = Math.max(currentIndex - 1, 0);
+        if (flatPRList[next]) setSelectedPR(flatPRList[next]);
+      } else if (e.key === "Enter" && !selectedPR && flatPRList.length > 0) {
+        e.preventDefault();
+        setSelectedPR(flatPRList[0]);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        if (showShortcuts) setShowShortcuts(false);
+        else setSelectedPR(null);
+      } else if (e.key === "n") {
+        e.preventDefault();
+        const nextUnseen = flatPRList.find((p) => !seenPRIds.has(`${p.repo}#${p.number}`));
+        if (nextUnseen) setSelectedPR(nextUnseen);
+      } else if (e.key === "s" && selectedPR) {
+        e.preventDefault();
+        handleToggleSeen(selectedPR);
+      } else if (e.key === "r") {
+        e.preventDefault();
+        refresh();
+      } else if (e.key === "?") {
+        e.preventDefault();
+        setShowShortcuts((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [selectedPR, flatPRList, seenPRIds, handleToggleSeen, refresh, showShortcuts]);
 
   const hasActiveFilters =
-    !!filters.search || !!filters.repo || !!filters.author || !!filters.ciStatus || !!filters.reviewStatus;
+    !!filters.search || !!filters.repo || !!filters.author || !!filters.label;
 
   // Keep selectedPR in sync with updated PR data
   const currentSelected = selectedPR ? prs.find((p) => p.id === selectedPR.id) ?? selectedPR : null;
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--background)]">
-      <Header
-        user={user}
-        loading={loading}
-        enriching={enriching}
-        lastRefreshed={lastRefreshed}
-        onRefresh={refresh}
-        onDisconnect={onDisconnect}
-        prCount={filteredPRs.length}
-        theme={theme}
-        setTheme={setTheme}
-      />
+    <TooltipProvider>
+      <KeyboardShortcutHelp open={showShortcuts} onClose={() => setShowShortcuts(false)} />
+      <div className="h-screen flex flex-col bg-background">
+        <Header
+          user={user}
+          loading={loading}
+          enriching={enriching}
+          lastRefreshed={lastRefreshed}
+          onRefresh={refresh}
+          onDisconnect={onDisconnect}
+          prCount={filteredPRs.length}
+          theme={theme}
+          setTheme={setTheme}
+          org={org}
+          orgs={orgs}
+          onOrgChange={setOrg}
+        />
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: PR list */}
-        <div className={`${currentSelected ? "w-[420px] shrink-0" : "flex-1 max-w-5xl mx-auto"} flex flex-col overflow-hidden transition-all duration-200`}>
-          <div className="px-4 shrink-0">
-            {error && (
-              <div className="mt-2 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400 flex items-center justify-between">
-                <span>{error}</span>
-                <button onClick={onDisconnect} className="text-xs font-medium hover:underline cursor-pointer">Disconnect</button>
+        {user && <ActivityTracker token={token} username={user.login} org={org} />}
+
+        <div className="flex-1 flex overflow-hidden">
+          {/* Left: PR list */}
+          <div
+            className={`${currentSelected || panel.current ? "shrink-0" : "flex-1 max-w-5xl mx-auto"} flex flex-col overflow-hidden transition-all duration-300 ease-out`}
+            style={(currentSelected || panel.current) ? { width: leftWidth } : undefined}
+          >
+            <div className="px-4 shrink-0">
+              {error && (
+                <div className="mt-2 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400 flex items-center justify-between">
+                  <span>{error}</span>
+                  <Button variant="link" size="xs" onClick={onDisconnect} className="text-red-400">Disconnect</Button>
+                </div>
+              )}
+              <FilterBar
+                filters={filters}
+                setFilter={setFilter}
+                availableRepos={availableRepos}
+                availableAuthors={availableAuthors}
+                availableLabels={availableLabels}
+              />
+              {/* Toolbar: compact actions */}
+              <div className="flex items-center gap-1.5 pb-2">
+                {batchMode ? (
+                  <div className="flex items-center gap-1.5 flex-1">
+                    <span className="text-[11px] text-muted-foreground">{batchSelected.size} selected</span>
+                    <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={batchSelectAll}>All</Button>
+                    <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={batchSelectNone}>None</Button>
+                    <div className="flex-1" />
+                    <Button variant="secondary" size="sm" className="text-[11px] h-6 px-2" onClick={batchMarkSeen} disabled={batchSelected.size === 0}>
+                      Mark seen ({batchSelected.size})
+                    </Button>
+                    <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={() => { setBatchMode(false); setBatchSelected(new Set()); }}>
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={() => setBatchMode(true)}>
+                      Select
+                    </Button>
+                    <div className="flex-1" />
+                    <Button variant="ghost" size="sm" className="text-[11px] h-6 px-2" onClick={markAllSeen}>
+                      Mark all seen
+                    </Button>
+                  </>
+                )}
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant={notificationsEnabled ? "secondary" : "ghost"}
+                        size="icon-xs"
+                        onClick={toggleNotifications}
+                      />
+                    }
+                  >
+                    <BellIcon />
+                  </TooltipTrigger>
+                  <TooltipContent>{notificationsEnabled ? "Notifications on" : "Enable notifications"}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button variant="ghost" size="icon-xs" onClick={() => setShowShortcuts(true)} />
+                    }
+                  >
+                    <KeyboardIcon />
+                  </TooltipTrigger>
+                  <TooltipContent>Keyboard shortcuts (?)</TooltipContent>
+                </Tooltip>
               </div>
-            )}
-            <FilterBar
-              filters={filters}
-              setFilter={setFilter}
-              availableRepos={availableRepos}
-              availableAuthors={availableAuthors}
-            />
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 pb-4">
+              {loading ? (
+                <div className="space-y-1.5 stagger-children">
+                  {Array.from({ length: 8 }).map((_, i) => (
+                    <SkeletonCard key={i} />
+                  ))}
+                </div>
+              ) : filteredPRs.length === 0 ? (
+                <EmptyState hasFilters={hasActiveFilters} />
+              ) : (
+                <div className="space-y-1">
+                  {Array.from(groupedPRs.entries()).map(([group, groupPRs]) => (
+                    <PRGroup
+                      key={group}
+                      title={group}
+                      prs={groupPRs}
+                      selectedId={currentSelected?.id ?? null}
+                      onSelect={handleSelectPR}
+                      seenIds={seenPRIds}
+                      onToggleSeen={handleToggleSeen}
+                      defaultOpen={group !== "Other"}
+                      batchMode={batchMode}
+                      batchSelected={batchSelected}
+                      onBatchToggle={handleBatchToggle}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto px-4 pb-4">
-            {loading ? (
-              <div className="space-y-1.5">
-                {Array.from({ length: 8 }).map((_, i) => (
-                  <SkeletonCard key={i} />
-                ))}
-              </div>
-            ) : filteredPRs.length === 0 ? (
-              <EmptyState hasFilters={hasActiveFilters} />
-            ) : (
-              <div className="space-y-1">
-                {Array.from(groupedPRs.entries()).map(([group, groupPRs]) => (
-                  <PRGroup
-                    key={group}
-                    title={group}
-                    prs={groupPRs}
-                    selectedId={currentSelected?.id ?? null}
-                    onSelect={setSelectedPR}
-                    defaultOpen={group !== "Other"}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
+          {/* Resize handle */}
+          {(currentSelected || panel.current) && <ResizeHandle onResize={handleResize} />}
+
+          {/* Right: Side panel */}
+          {(currentSelected || panel.current) && (
+            <div
+              className="flex-1 min-w-0 overflow-hidden transition-all duration-300 ease-out"
+              style={{
+                transform: panel.isOpen ? "translateX(0)" : "translateX(100%)",
+                opacity: panel.isOpen ? 1 : 0,
+              }}
+            >
+              {(panel.current ?? currentSelected) && (
+                <SidePanel
+                  key={(panel.current ?? currentSelected)!.id}
+                  pr={(panel.current ?? currentSelected)!}
+                  token={token}
+                  onClose={() => setSelectedPR(null)}
+                  onRefresh={refresh}
+                />
+              )}
+            </div>
+          )}
         </div>
-
-        {/* Right: Side panel */}
-        {currentSelected && (
-          <div className="flex-1 min-w-0">
-            <SidePanel
-              key={currentSelected.id}
-              pr={currentSelected}
-              token={token}
-              onClose={() => setSelectedPR(null)}
-            />
-          </div>
-        )}
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
