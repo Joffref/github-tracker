@@ -38,6 +38,7 @@ export interface DashboardPR {
   additions: number;
   deletions: number;
   changedFiles: number;
+  hasNewCommitsSinceMyReview: boolean;
 }
 
 export interface PRFile {
@@ -284,6 +285,7 @@ function mapSearchItemToPR(item: any, _username: string): DashboardPR {
     additions: 0,
     deletions: 0,
     changedFiles: 0,
+    hasNewCommitsSinceMyReview: false,
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -295,8 +297,8 @@ export async function enrichPRDetails(
   pr: DashboardPR,
   username: string
 ): Promise<DashboardPR> {
-  const [reviews, checks, prDetail] = await Promise.allSettled([
-    ghFetch<Array<{ user: { login: string }; state: string }>>(
+  const [reviews, checks, prDetail, commits] = await Promise.allSettled([
+    ghFetch<Array<{ user: { login: string }; state: string; submitted_at: string }>>(
       token,
       `/repos/${pr.repo}/pulls/${pr.number}/reviews`
     ),
@@ -316,6 +318,10 @@ export async function enrichPRDetails(
       deletions: number;
       changed_files: number;
     }>(token, `/repos/${pr.repo}/pulls/${pr.number}`),
+    ghFetch<Array<{ commit: { committer: { date: string } } }>>(
+      token,
+      `/repos/${pr.repo}/pulls/${pr.number}/commits?per_page=100`
+    ),
   ]);
 
   let enriched = { ...pr };
@@ -351,6 +357,20 @@ export async function enrichPRDetails(
       avatar: "",
     }));
     enriched.reviewState = deriveReviewState(enriched.reviewers);
+
+    // Detect new commits since the current user's last review
+    const myReviews = reviewList.filter(
+      (r) => r.user.login.toLowerCase() === username.toLowerCase() && r.submitted_at
+    );
+    if (myReviews.length > 0 && commits.status === "fulfilled" && commits.value) {
+      const lastReviewDate = new Date(
+        Math.max(...myReviews.map((r) => new Date(r.submitted_at).getTime()))
+      );
+      const hasNewerCommit = commits.value.some(
+        (c) => new Date(c.commit.committer.date) > lastReviewDate
+      );
+      enriched.hasNewCommitsSinceMyReview = hasNewerCommit;
+    }
   }
 
   // Checks — if we didn't have headSha initially, fetch with the one from prDetail

@@ -30,6 +30,7 @@ export function categorizePR(
   if (isMine && pr.reviewState === "approved") return "other";
 
   if (!isMine && reviewRequestedFromMe) return "needs_attention";
+  if (!isMine && pr.hasNewCommitsSinceMyReview) return "needs_attention";
   if (isMine && pr.reviewState === "changes_requested") return "needs_attention";
   if (isMine && pr.ciStatus === "failure") return "needs_attention";
   if (isMine && pr.hasConflicts) return "needs_attention";
