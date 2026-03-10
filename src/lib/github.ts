@@ -92,6 +92,26 @@ export interface CheckRun {
   output: { title: string | null; summary: string | null };
 }
 
+export interface WorkflowStep {
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion: string | null;
+  number: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface WorkflowJob {
+  id: number;
+  run_id: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  steps: WorkflowStep[];
+}
+
 export interface GitHubUser {
   login: string;
   avatar_url: string;
@@ -602,6 +622,43 @@ export async function rerunFailedChecks(
       })
     )
   );
+}
+
+export async function fetchWorkflowJobs(
+  token: string,
+  repo: string,
+  headSha: string
+): Promise<WorkflowJob[]> {
+  const data = await ghFetch<{ total_count: number; workflow_runs: Array<{ id: number }> }>(
+    token,
+    `/repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100`
+  );
+  const jobResults = await Promise.all(
+    data.workflow_runs.map((run) =>
+      ghFetch<{ total_count: number; jobs: WorkflowJob[] }>(
+        token,
+        `/repos/${repo}/actions/runs/${run.id}/jobs?per_page=100`
+      )
+    )
+  );
+  return jobResults.flatMap((r) => r.jobs);
+}
+
+export async function fetchJobLogs(
+  token: string,
+  repo: string,
+  jobId: number
+): Promise<string> {
+  const res = await fetch("/api/github/job-logs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, repo, jobId }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch logs: ${res.status}`);
+  }
+  const data = await res.json();
+  return data.logs;
 }
 
 export async function postReviewComment(

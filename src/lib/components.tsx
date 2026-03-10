@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, DailyActivity, ThreadResolution } from "./github";
-import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
+import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution } from "./github";
+import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -2256,6 +2256,10 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
   const [checkRuns, setCheckRuns] = useState<CheckRun[] | null>(null);
   const [checkRunsLoading, setCheckRunsLoading] = useState(false);
   const [rerunning, setRerunning] = useState(false);
+  const [workflowJobs, setWorkflowJobs] = useState<WorkflowJob[]>([]);
+  const [expandedRuns, setExpandedRuns] = useState<Set<number>>(new Set());
+  const [jobLogs, setJobLogs] = useState<Record<number, string>>({});
+  const [jobLogsLoading, setJobLogsLoading] = useState<Set<number>>(new Set());
   const [threadResolution, setThreadResolution] = useState<ThreadResolution | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -2300,18 +2304,23 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
     return () => { cancelled = true; };
   }, [tab, conflictFiles, token, pr.repo, pr.number, pr.hasConflicts, pr.baseRef, pr.headRef]);
 
-  // Lazy-load check runs when the CI tab is opened
+  // Lazy-load check runs and workflow jobs when the CI tab is opened
   useEffect(() => {
     if (tab !== "ci" || checkRuns !== null || !pr.headSha) return;
     let cancelled = false;
     setCheckRunsLoading(true);
-    fetchCheckRuns(token, pr.repo, pr.headSha).then((runs) => {
+    Promise.all([
+      fetchCheckRuns(token, pr.repo, pr.headSha),
+      fetchWorkflowJobs(token, pr.repo, pr.headSha).catch(() => [] as WorkflowJob[]),
+    ]).then(([runs, jobs]) => {
       if (cancelled) return;
       setCheckRuns(runs);
+      setWorkflowJobs(jobs);
       setCheckRunsLoading(false);
     }).catch(() => {
       if (cancelled) return;
       setCheckRuns([]);
+      setWorkflowJobs([]);
       setCheckRunsLoading(false);
     });
     return () => { cancelled = true; };
@@ -2328,6 +2337,34 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
       }, 2000);
     } catch { /* ignore */ }
     setRerunning(false);
+  };
+
+  const toggleRunExpanded = (runId: number) => {
+    setExpandedRuns((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  };
+
+  const findJobForCheckRun = (run: CheckRun): WorkflowJob | undefined =>
+    workflowJobs.find((j) => j.name === run.name);
+
+  const loadJobLogs = async (jobId: number) => {
+    if (jobLogs[jobId] || jobLogsLoading.has(jobId)) return;
+    setJobLogsLoading((prev) => new Set(prev).add(jobId));
+    try {
+      const logs = await fetchJobLogs(token, pr.repo, jobId);
+      setJobLogs((prev) => ({ ...prev, [jobId]: logs }));
+    } catch {
+      setJobLogs((prev) => ({ ...prev, [jobId]: "Failed to load logs." }));
+    }
+    setJobLogsLoading((prev) => {
+      const next = new Set(prev);
+      next.delete(jobId);
+      return next;
+    });
   };
 
   const totalComments = (issueComments?.length ?? 0) + (reviewComments?.length ?? 0);
@@ -2628,71 +2665,168 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
                       {/* Check runs list */}
                       {checkRuns
                         .sort((a, b) => {
-                          // Failed first, then running, then passed
                           const order = (r: CheckRun) =>
                             r.conclusion === "failure" || r.conclusion === "timed_out" ? 0
                             : r.status !== "completed" ? 1
                             : 2;
                           return order(a) - order(b);
                         })
-                        .map((run) => (
-                        <a
-                          key={run.id}
-                          href={run.html_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border hover:bg-muted/50 transition-colors group/ci"
-                        >
-                          {/* Status icon */}
-                          <span className="shrink-0">
-                            {run.status !== "completed" ? (
-                              <span className="flex w-4 h-4 items-center justify-center">
-                                <span className="w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
-                              </span>
-                            ) : run.conclusion === "success" ? (
-                              <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            ) : run.conclusion === "failure" || run.conclusion === "timed_out" ? (
-                              <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            ) : run.conclusion === "skipped" ? (
-                              <svg className="w-4 h-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                                <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
-                              </svg>
-                            ) : (
-                              <span className="w-4 h-4 flex items-center justify-center">
-                                <span className="w-2.5 h-2.5 rounded-full bg-muted-foreground/40" />
-                              </span>
-                            )}
-                          </span>
+                        .map((run) => {
+                          const isExpanded = expandedRuns.has(run.id);
+                          const job = findJobForCheckRun(run);
+                          return (
+                        <div key={run.id} className="rounded-lg border border-border overflow-hidden">
+                          <button
+                            onClick={() => toggleRunExpanded(run.id)}
+                            className="flex items-center gap-3 px-3 py-2 w-full text-left hover:bg-muted/50 transition-colors group/ci"
+                          >
+                            {/* Status icon */}
+                            <span className="shrink-0">
+                              {run.status !== "completed" ? (
+                                <span className="flex w-4 h-4 items-center justify-center">
+                                  <span className="w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent animate-spin" />
+                                </span>
+                              ) : run.conclusion === "success" ? (
+                                <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                  <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              ) : run.conclusion === "failure" || run.conclusion === "timed_out" ? (
+                                <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                  <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              ) : run.conclusion === "skipped" ? (
+                                <svg className="w-4 h-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                  <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              ) : (
+                                <span className="w-4 h-4 flex items-center justify-center">
+                                  <span className="w-2.5 h-2.5 rounded-full bg-muted-foreground/40" />
+                                </span>
+                              )}
+                            </span>
 
-                          {/* Name and app */}
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium text-foreground truncate group-hover/ci:text-primary transition-colors">
-                              {run.name}
-                            </p>
-                            {run.app && (
-                              <p className="text-[11px] text-muted-foreground truncate">{run.app.name}</p>
-                            )}
-                          </div>
+                            {/* Name and app */}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-foreground truncate group-hover/ci:text-primary transition-colors">
+                                {run.name}
+                              </p>
+                              {run.app && (
+                                <p className="text-[11px] text-muted-foreground truncate">{run.app.name}</p>
+                              )}
+                            </div>
 
-                          {/* Duration */}
-                          <span className="text-[11px] text-muted-foreground shrink-0">
-                            {run.started_at && run.completed_at
-                              ? formatDuration(new Date(run.completed_at).getTime() - new Date(run.started_at).getTime())
-                              : run.started_at
-                                ? "running..."
-                                : "queued"}
-                          </span>
+                            {/* Duration */}
+                            <span className="text-[11px] text-muted-foreground shrink-0">
+                              {run.started_at && run.completed_at
+                                ? formatDuration(new Date(run.completed_at).getTime() - new Date(run.started_at).getTime())
+                                : run.started_at
+                                  ? "running..."
+                                  : "queued"}
+                            </span>
 
-                          {/* External link indicator */}
-                          <svg className="w-3 h-3 text-muted-foreground opacity-0 group-hover/ci:opacity-100 transition-opacity shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </a>
-                      ))}
+                            {/* Chevron */}
+                            <svg className={cn("w-3.5 h-3.5 text-muted-foreground shrink-0 transition-transform", isExpanded && "rotate-90")} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+
+                          {/* Expanded content */}
+                          {isExpanded && (
+                            <div className="border-t border-border bg-muted/30 px-3 py-2 space-y-2">
+                              {/* Steps */}
+                              {job && job.steps.length > 0 ? (
+                                <div className="space-y-0.5">
+                                  {job.steps.map((step) => (
+                                    <div key={step.number} className="flex items-center gap-2 py-0.5 text-xs">
+                                      <span className="shrink-0">
+                                        {step.status !== "completed" ? (
+                                          <span className="w-3 h-3 flex items-center justify-center">
+                                            <span className="w-2 h-2 rounded-full border border-amber-500 border-t-transparent animate-spin" />
+                                          </span>
+                                        ) : step.conclusion === "success" ? (
+                                          <svg className="w-3 h-3 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                            <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+                                          </svg>
+                                        ) : step.conclusion === "failure" ? (
+                                          <svg className="w-3 h-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                            <path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" />
+                                          </svg>
+                                        ) : step.conclusion === "skipped" ? (
+                                          <svg className="w-3 h-3 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                            <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+                                          </svg>
+                                        ) : (
+                                          <span className="w-3 h-3 flex items-center justify-center">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/40" />
+                                          </span>
+                                        )}
+                                      </span>
+                                      <span className={cn("flex-1 truncate", step.conclusion === "failure" ? "text-red-500 font-medium" : "text-muted-foreground")}>
+                                        {step.name}
+                                      </span>
+                                      {step.started_at && step.completed_at && (
+                                        <span className="text-[10px] text-muted-foreground/70 shrink-0">
+                                          {formatDuration(new Date(step.completed_at).getTime() - new Date(step.started_at).getTime())}
+                                        </span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <p className="text-[11px] text-muted-foreground italic">No step details available</p>
+                              )}
+
+                              {/* Actions row */}
+                              <div className="flex items-center gap-2 pt-1 border-t border-border/50">
+                                {job && (
+                                  <button
+                                    onClick={() => loadJobLogs(job.id)}
+                                    disabled={jobLogsLoading.has(job.id)}
+                                    className="text-[11px] text-primary hover:underline disabled:opacity-50"
+                                  >
+                                    {jobLogsLoading.has(job.id) ? "Loading logs..." : jobLogs[job.id] ? "Logs loaded" : "View logs"}
+                                  </button>
+                                )}
+                                <div className="flex-1" />
+                                <a
+                                  href={run.html_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[11px] text-muted-foreground hover:text-primary flex items-center gap-1"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  Open in GitHub
+                                  <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </a>
+                              </div>
+
+                              {/* Logs */}
+                              {job && jobLogs[job.id] && (
+                                <div className="mt-1">
+                                  <pre className="text-[10px] leading-relaxed font-mono bg-background rounded p-2 max-h-80 overflow-auto whitespace-pre-wrap break-all border border-border/50">
+                                    {jobLogs[job.id].split("\n").map((line, i) => {
+                                      // Strip timestamp prefix (e.g., "2024-01-15T10:00:00.0000000Z ")
+                                      const cleaned = line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?/, "");
+                                      // Skip group markers
+                                      if (cleaned.startsWith("##[group]") || cleaned === "##[endgroup]") return null;
+                                      const isError = cleaned.startsWith("##[error]");
+                                      const display = cleaned.replace(/^##\[(error|warning|notice|debug)]\s?/, "");
+                                      return (
+                                        <span key={i} className={isError ? "text-red-500" : "text-muted-foreground"}>
+                                          {display}{"\n"}
+                                        </span>
+                                      );
+                                    })}
+                                  </pre>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                          );
+                        })}
                     </>
                   ) : (
                     <p className="text-xs text-muted-foreground italic">
