@@ -31,6 +31,7 @@ function makePR(overrides: Partial<DashboardPR> = {}): DashboardPR {
     additions: 10,
     deletions: 5,
     changedFiles: 3,
+    hasNewCommitsSinceMyReview: false,
     ...overrides,
   };
 }
