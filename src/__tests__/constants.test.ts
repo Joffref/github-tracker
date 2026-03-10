@@ -55,6 +55,7 @@ function makePR(overrides: Partial<DashboardPR> = {}): DashboardPR {
     additions: 10,
     deletions: 5,
     changedFiles: 3,
+    hasNewCommitsSinceMyReview: false,
     ...overrides,
   };
 }
@@ -80,6 +81,11 @@ describe("categorizePR", () => {
 
     it("flags my PRs with merge conflicts", () => {
       const pr = makePR({ hasConflicts: true });
+      expect(categorizePR(pr, me)).toBe("needs_attention");
+    });
+
+    it("flags other's PRs with new commits since my review", () => {
+      const pr = makePR({ author: "other", hasNewCommitsSinceMyReview: true });
       expect(categorizePR(pr, me)).toBe("needs_attention");
     });
   });
