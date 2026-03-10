@@ -16,12 +16,9 @@ RUN corepack enable && corepack prepare pnpm@latest --activate && pnpm install -
 
 COPY . .
 
-# Accept build-time env vars for Next.js (NEXT_PUBLIC_ vars are inlined at build)
-ARG NEXT_PUBLIC_GITHUB_CLIENT_ID
-ENV NEXT_PUBLIC_GITHUB_CLIENT_ID=$NEXT_PUBLIC_GITHUB_CLIENT_ID
-
 # Build the Next.js app
-RUN pnpm build
+# Source .env if present so NEXT_PUBLIC_* vars are inlined at build time
+RUN if [ -f .env ]; then export $(cat .env | xargs) 2>/dev/null; fi && pnpm build
 
 EXPOSE 3000
 
