@@ -44,8 +44,10 @@ import {
   type FilterState,
   type GroupBy,
   type Theme,
+  useDocumentVisibility,
+  useRelativeTime,
 } from "./hooks";
-import { timeAgo } from "./constants";
+import { timeAgo, SIDEPANEL_REFRESH_INTERVAL_MS, ACTIVITY_REFRESH_INTERVAL_MS } from "./constants";
 import { cn } from "@/lib/utils";
 
 // shadcn/ui imports
@@ -550,6 +552,19 @@ interface HeaderProps {
   onOrgChange: (org: string | null) => void;
 }
 
+function HeaderTimestamp({ lastRefreshed, enriching }: { lastRefreshed: Date | null; enriching: boolean }) {
+  const { text, isStale } = useRelativeTime(lastRefreshed);
+  if (!lastRefreshed) return null;
+  return (
+    <span className={cn(
+      "text-xs hidden sm:block transition-colors",
+      isStale ? "text-amber-500" : "text-muted-foreground"
+    )}>
+      {enriching ? "Updating..." : `Updated ${text}`}
+    </span>
+  );
+}
+
 function Header({
   user,
   loading,
@@ -595,11 +610,7 @@ function Header({
         </div>
 
         <div className="flex items-center gap-3">
-          {lastRefreshed && (
-            <span className="text-xs text-muted-foreground hidden sm:block">
-              {enriching ? "Updating..." : `Updated ${timeAgo(lastRefreshed.toISOString())}`}
-            </span>
-          )}
+          <HeaderTimestamp lastRefreshed={lastRefreshed} enriching={enriching} />
           <ToggleGroup
             value={[theme]}
             onValueChange={(values) => {
@@ -2081,7 +2092,7 @@ function LabelEditor({
 
 // ── Quick Actions ─────────────────────────────────────────────────
 
-function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string; onRefresh: () => void }) {
+function QuickActions({ pr, token, onRefresh, onOptimisticUpdate }: { pr: DashboardPR; token: string; onRefresh: () => void; onOptimisticUpdate?: (patch: Partial<DashboardPR>) => void }) {
   const [action, setAction] = useState<"request_changes" | "merge" | "close" | null>(null);
   const [mergeMethod, setMergeMethod] = useState<"squash" | "merge" | "rebase">("squash");
   const [body, setBody] = useState("");
@@ -2095,7 +2106,9 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
     try {
       await submitReview(token, pr.repo, pr.number, "APPROVE");
       setSuccess("Approved!");
-      setTimeout(() => { setSuccess(null); onRefresh(); }, 1500);
+      onOptimisticUpdate?.({ reviewState: "approved" });
+      onRefresh();
+      setTimeout(() => setSuccess(null), 1500);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -2122,7 +2135,11 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
         setSuccess("Closed!");
       }
       setBody("");
-      setTimeout(() => { setSuccess(null); setAction(null); onRefresh(); }, 1500);
+      if (action === "request_changes") {
+        onOptimisticUpdate?.({ reviewState: "changes_requested" });
+      }
+      onRefresh();
+      setTimeout(() => { setSuccess(null); setAction(null); }, 1500);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -2387,7 +2404,7 @@ function CommentsTab({ threadResolution, issueComments, threads, totalComments, 
   );
 }
 
-function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: string; onClose: () => void; onRefresh: () => void }) {
+function SidePanel({ pr, token, onClose, onRefresh, onOptimisticUpdate }: { pr: DashboardPR; token: string; onClose: () => void; onRefresh: () => void; onOptimisticUpdate?: (patch: Partial<DashboardPR>) => void }) {
   const [files, setFiles] = useState<PRFile[] | null>(null);
   const [issueComments, setIssueComments] = useState<PRComment[] | null>(null);
   const [reviewComments, setReviewComments] = useState<ReviewComment[] | null>(null);
@@ -2435,6 +2452,33 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
     });
     return () => { cancelled = true; };
   }, [token, pr.repo, pr.number, pr.headSha]);
+
+  // Silent periodic refresh of mutable panel data
+  const { isVisible } = useDocumentVisibility();
+  const checkRunsLoaded = checkRuns !== null;
+  useEffect(() => {
+    if (!isVisible) return;
+    const id = setInterval(async () => {
+      const [ic, rc, tr] = await Promise.allSettled([
+        fetchIssueComments(token, pr.repo, pr.number),
+        fetchReviewComments(token, pr.repo, pr.number),
+        fetchThreadResolutions(token, pr.repo, pr.number),
+      ]);
+      if (ic.status === "fulfilled") setIssueComments(ic.value);
+      if (rc.status === "fulfilled") setReviewComments(rc.value);
+      if (tr.status === "fulfilled") setThreadResolution(tr.value);
+
+      if (checkRunsLoaded && pr.headSha) {
+        const [runs, jobs] = await Promise.allSettled([
+          fetchCheckRuns(token, pr.repo, pr.headSha),
+          fetchWorkflowJobs(token, pr.repo, pr.headSha),
+        ]);
+        if (runs.status === "fulfilled") setCheckRuns(runs.value);
+        if (jobs.status === "fulfilled") setWorkflowJobs(jobs.value);
+      }
+    }, SIDEPANEL_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [token, pr.repo, pr.number, pr.headSha, isVisible, checkRunsLoaded]);
 
   // Lazy-load conflict files when the tab is opened
   useEffect(() => {
@@ -2611,7 +2655,7 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
 
         {/* Row 3: quick actions */}
         <div className="flex items-center gap-1.5">
-          <QuickActions pr={pr} token={token} onRefresh={onRefresh} />
+          <QuickActions pr={pr} token={token} onRefresh={onRefresh} onOptimisticUpdate={onOptimisticUpdate} />
         </div>
 
         {/* Row 4: tabs */}
@@ -3410,6 +3454,8 @@ function ActivityTracker({ token, username, org }: { token: string; username: st
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<"reviews" | "comments" | "merges" | null>(null);
 
+  const { isVisible: activityVisible } = useDocumentVisibility();
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -3418,6 +3464,15 @@ function ActivityTracker({ token, username, org }: { token: string; username: st
     }).catch(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [token, username, org]);
+
+  // Periodic silent refresh
+  useEffect(() => {
+    if (!activityVisible) return;
+    const id = setInterval(() => {
+      fetchDailyActivity(token, username, org).then(setActivity).catch(() => {});
+    }, ACTIVITY_REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [token, username, org, activityVisible]);
 
   if (loading) {
     return (
@@ -3516,7 +3571,7 @@ function useDeferredValue<T>(value: T, delay: number): { current: T; isOpen: boo
 export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardProps) {
   const [org, setOrg] = useLocalStorage<string | null>("gh-dashboard-org", null);
   const [orgs, setOrgs] = useState<Array<{ login: string; avatar_url: string }>>([]);
-  const { prs, user, loading, enriching, error, refresh, lastRefreshed } = usePRs(token, org);
+  const { prs, user, loading, enriching, error, refresh, lastRefreshed, updatePR } = usePRs(token, org);
 
   // Fetch user orgs on mount
   useEffect(() => {
@@ -3850,6 +3905,7 @@ export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardPro
                   token={token}
                   onClose={() => setSelectedPR(null)}
                   onRefresh={refresh}
+                  onOptimisticUpdate={(patch) => updatePR((panel.current ?? currentSelected)!.id, patch)}
                 />
               )}
             </div>

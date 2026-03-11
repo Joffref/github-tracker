@@ -10,7 +10,8 @@ import {
   type CIStatus,
   type ReviewState,
 } from "./github";
-import { categorizePR, REFRESH_INTERVAL_MS } from "./constants";
+import { categorizePR, REFRESH_INTERVAL_MS, STALE_THRESHOLD_MS } from "./constants";
+import { timeAgo } from "./constants";
 
 // ── useLocalStorage ────────────────────────────────────────────────
 
@@ -90,6 +91,38 @@ export function useTheme(): [Theme, (t: Theme) => void] {
   return [theme, setTheme];
 }
 
+// ── useDocumentVisibility ──────────────────────────────────────────
+
+export function useDocumentVisibility(): { isVisible: boolean } {
+  const [isVisible, setIsVisible] = useState(true);
+
+  useEffect(() => {
+    const handler = () => setIsVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, []);
+
+  return { isVisible };
+}
+
+// ── useRelativeTime ────────────────────────────────────────────────
+
+export function useRelativeTime(date: Date | null): { text: string | null; isStale: boolean } {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!date) return;
+    const id = setInterval(() => setTick((t) => t + 1), 10_000);
+    return () => clearInterval(id);
+  }, [date]);
+
+  if (!date) return { text: null, isStale: false };
+  return {
+    text: timeAgo(date.toISOString()),
+    isStale: Date.now() - date.getTime() > STALE_THRESHOLD_MS,
+  };
+}
+
 // ── usePRs ─────────────────────────────────────────────────────────
 
 interface UsePRsReturn {
@@ -100,6 +133,7 @@ interface UsePRsReturn {
   error: string | null;
   refresh: () => void;
   lastRefreshed: Date | null;
+  updatePR: (id: number, patch: Partial<DashboardPR>) => void;
 }
 
 export function usePRs(token: string | null, org?: string | null): UsePRsReturn {
@@ -192,6 +226,9 @@ export function usePRs(token: string | null, org?: string | null): UsePRsReturn 
     setLastRefreshed(null);
   }, [org]);
 
+  const { isVisible } = useDocumentVisibility();
+  const wasVisible = useRef(true);
+
   useEffect(() => {
     load();
     return () => {
@@ -199,13 +236,26 @@ export function usePRs(token: string | null, org?: string | null): UsePRsReturn 
     };
   }, [load]);
 
+  // Poll only when tab is visible
   useEffect(() => {
-    if (!token) return;
+    if (!token || !isVisible) return;
     const id = setInterval(load, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [token, load]);
+  }, [token, load, isVisible]);
 
-  return { prs, user, loading, enriching, error, refresh: load, lastRefreshed };
+  // Refresh immediately when tab regains focus
+  useEffect(() => {
+    if (isVisible && !wasVisible.current && token) {
+      load();
+    }
+    wasVisible.current = isVisible;
+  }, [isVisible, token, load]);
+
+  const updatePR = useCallback((id: number, patch: Partial<DashboardPR>) => {
+    setPRs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }, []);
+
+  return { prs, user, loading, enriching, error, refresh: load, lastRefreshed, updatePR };
 }
 
 // ── useFilters ─────────────────────────────────────────────────────
