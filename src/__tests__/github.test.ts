@@ -15,6 +15,9 @@ import {
   fetchThreadResolutions,
   resolveReviewThread,
   unresolveReviewThread,
+  requestReviewers,
+  removeReviewRequest,
+  fetchCollaborators,
 } from "../lib/github";
 
 // ── Mock fetch ───────────────────────────────────────────────────────
@@ -504,6 +507,72 @@ describe("unresolveReviewThread", () => {
 
     const result = await unresolveReviewThread(TOKEN, "RT_123");
     expect(result).toBe(true);
+  });
+});
+
+// ── Review request management ────────────────────────────────────────
+
+describe("requestReviewers", () => {
+  it("sends POST with reviewers array", async () => {
+    mockFetch.mockReturnValueOnce(
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+
+    await requestReviewers(TOKEN, "owner/repo", 42, ["alice", "bob"]);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/pulls/42/requested_reviewers",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ reviewers: ["alice", "bob"] }),
+      })
+    );
+  });
+
+  it("throws on error", async () => {
+    mockFetch.mockReturnValueOnce(errorResponse(422, "Validation failed"));
+
+    await expect(requestReviewers(TOKEN, "owner/repo", 42, ["invalid"])).rejects.toThrow(
+      "GitHub API 422"
+    );
+  });
+});
+
+describe("removeReviewRequest", () => {
+  it("sends DELETE with reviewers array", async () => {
+    mockFetch.mockReturnValueOnce(
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    );
+
+    await removeReviewRequest(TOKEN, "owner/repo", 42, ["alice"]);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/pulls/42/requested_reviewers",
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ reviewers: ["alice"] }),
+      })
+    );
+  });
+});
+
+describe("fetchCollaborators", () => {
+  it("fetches repo collaborators", async () => {
+    const collabs = [
+      { login: "alice", avatar_url: "https://avatar/alice" },
+      { login: "bob", avatar_url: "https://avatar/bob" },
+    ];
+    mockFetch.mockReturnValueOnce(jsonResponse(collabs));
+
+    const result = await fetchCollaborators(TOKEN, "owner/repo");
+
+    expect(result).toEqual(collabs);
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://api.github.com/repos/owner/repo/collaborators?per_page=100",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${TOKEN}` }),
+      })
+    );
   });
 });
 
