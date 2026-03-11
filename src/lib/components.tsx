@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution } from "./github";
-import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
+import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, requestReviewers, removeReviewRequest, fetchCollaborators, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -236,6 +236,17 @@ function MergeIcon() {
       <circle cx="18" cy="18" r="3" />
       <circle cx="6" cy="6" r="3" />
       <path d="M6 21V9a9 9 0 009 9" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function UserPlusIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4-4v2" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="9" cy="7" r="4" />
+      <line x1="19" y1="8" x2="19" y2="14" strokeLinecap="round" />
+      <line x1="22" y1="11" x2="16" y2="11" strokeLinecap="round" />
     </svg>
   );
 }
@@ -2218,6 +2229,181 @@ function QuickActions({ pr, token, onRefresh }: { pr: DashboardPR; token: string
   );
 }
 
+function ReviewerManager({ pr, token, onRefresh }: { pr: DashboardPR; token: string; onRefresh: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [collaborators, setCollaborators] = useState<Array<{ login: string; avatar_url: string }> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open || collaborators !== null) return;
+    setLoading(true);
+    fetchCollaborators(token, pr.repo)
+      .then(setCollaborators)
+      .catch(() => setCollaborators([]))
+      .finally(() => setLoading(false));
+  }, [open, collaborators, token, pr.repo]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const currentReviewerLogins = new Set([
+    ...pr.requestedReviewers.map((r) => r.login.toLowerCase()),
+    ...pr.reviewers.map((r) => r.login.toLowerCase()),
+  ]);
+
+  const filtered = (collaborators ?? []).filter(
+    (c) =>
+      c.login.toLowerCase() !== pr.author.toLowerCase() &&
+      !currentReviewerLogins.has(c.login.toLowerCase()) &&
+      c.login.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const doAdd = async (login: string) => {
+    setError(null);
+    try {
+      await requestReviewers(token, pr.repo, pr.number, [login]);
+      setOpen(false);
+      setSearch("");
+      onRefresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const doRemove = async (login: string) => {
+    setError(null);
+    try {
+      await removeReviewRequest(token, pr.repo, pr.number, [login]);
+      onRefresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const reviewStateColor = (state: string) => {
+    switch (state) {
+      case "APPROVED": return "text-emerald-500";
+      case "CHANGES_REQUESTED": return "text-red-500";
+      case "COMMENTED": return "text-blue-500";
+      default: return "text-muted-foreground";
+    }
+  };
+
+  const reviewStateLabel = (state: string) => {
+    switch (state) {
+      case "APPROVED": return "Approved";
+      case "CHANGES_REQUESTED": return "Changes requested";
+      case "COMMENTED": return "Commented";
+      case "DISMISSED": return "Dismissed";
+      default: return state;
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap relative">
+      {/* Existing reviewers who have submitted reviews */}
+      {pr.reviewers.map((r) => (
+        <Tooltip key={r.login}>
+          <TooltipTrigger render={
+            <span className={cn("inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-muted", reviewStateColor(r.state))}>
+              {r.login}
+              <span className="text-[8px] opacity-70">{reviewStateLabel(r.state)}</span>
+            </span>
+          } />
+          <TooltipContent>{r.login}: {reviewStateLabel(r.state)}</TooltipContent>
+        </Tooltip>
+      ))}
+
+      {/* Pending review requests */}
+      {pr.requestedReviewers
+        .filter((rr) => !pr.reviewers.some((r) => r.login.toLowerCase() === rr.login.toLowerCase()))
+        .map((r) => (
+        <Tooltip key={r.login}>
+          <TooltipTrigger render={
+            <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              {r.login}
+              <span className="text-[8px] opacity-70">Pending</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); doRemove(r.login); }}
+                className="ml-0.5 hover:text-red-500 transition-colors"
+                title={`Remove review request from ${r.login}`}
+              >
+                <svg className="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                  <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+                </svg>
+              </button>
+            </span>
+          } />
+          <TooltipContent>Review requested from {r.login}</TooltipContent>
+        </Tooltip>
+      ))}
+
+      {/* Add reviewer button */}
+      <div ref={dropdownRef} className="relative">
+        <Tooltip>
+          <TooltipTrigger render={
+            <Button
+              variant="outline"
+              size="xs"
+              className="text-[10px] h-5 gap-0.5 px-1.5"
+              onClick={() => setOpen(!open)}
+            />
+          }>
+            <UserPlusIcon /> Reviewer
+          </TooltipTrigger>
+          <TooltipContent>Request a review</TooltipContent>
+        </Tooltip>
+
+        {open && (
+          <div className="absolute top-full left-0 mt-1 w-56 bg-popover border border-border rounded-lg shadow-lg z-50 overflow-hidden">
+            <div className="p-2 border-b border-border">
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search collaborators..."
+                className="h-7 text-xs"
+                autoFocus
+              />
+            </div>
+            <div className="max-h-48 overflow-y-auto">
+              {loading && <div className="p-3 text-xs text-muted-foreground text-center">Loading...</div>}
+              {!loading && filtered.length === 0 && (
+                <div className="p-3 text-xs text-muted-foreground text-center">No collaborators found</div>
+              )}
+              {filtered.map((c) => (
+                <button
+                  key={c.login}
+                  onClick={() => doAdd(c.login)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-accent transition-colors text-left"
+                >
+                  <Avatar size="sm" className="size-4">
+                    <AvatarImage src={c.avatar_url} alt={c.login} />
+                    <AvatarFallback>{c.login.slice(0, 2).toUpperCase()}</AvatarFallback>
+                  </Avatar>
+                  <span className="truncate">{c.login}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {error && <span className="text-[10px] text-red-500">{error}</span>}
+    </div>
+  );
+}
+
 function CommentsTab({ threadResolution, issueComments, threads, totalComments, token, pr, findThreadInfo, handleResolutionChanged, handleReviewCommentPosted, onIssueCommentPosted }: {
   threadResolution: ThreadResolution | null;
   issueComments: PRComment[] | null;
@@ -2609,7 +2795,10 @@ function SidePanel({ pr, token, onClose, onRefresh }: { pr: DashboardPR; token: 
           </a>
         </div>
 
-        {/* Row 3: quick actions */}
+        {/* Row 3: reviewers */}
+        <ReviewerManager pr={pr} token={token} onRefresh={onRefresh} />
+
+        {/* Row 4: quick actions */}
         <div className="flex items-center gap-1.5">
           <QuickActions pr={pr} token={token} onRefresh={onRefresh} />
         </div>

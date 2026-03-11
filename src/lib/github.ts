@@ -39,6 +39,7 @@ export interface DashboardPR {
   deletions: number;
   changedFiles: number;
   hasNewCommitsSinceMyReview: boolean;
+  requestedReviewers: Array<{ login: string; avatar: string }>;
 }
 
 export interface PRFile {
@@ -306,6 +307,7 @@ function mapSearchItemToPR(item: any, _username: string): DashboardPR {
     deletions: 0,
     changedFiles: 0,
     hasNewCommitsSinceMyReview: false,
+    requestedReviewers: [],
   };
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -333,7 +335,7 @@ export async function enrichPRDetails(
       mergeable_state: string;
       head: { sha: string; ref: string };
       base: { ref: string };
-      requested_reviewers: Array<{ login: string }>;
+      requested_reviewers: Array<{ login: string; avatar_url: string }>;
       additions: number;
       deletions: number;
       changed_files: number;
@@ -356,6 +358,10 @@ export async function enrichPRDetails(
     enriched.reviewRequestedFromMe = (d.requested_reviewers ?? []).some(
       (r) => r.login.toLowerCase() === username.toLowerCase()
     );
+    enriched.requestedReviewers = (d.requested_reviewers ?? []).map((r) => ({
+      login: r.login,
+      avatar: r.avatar_url ?? "",
+    }));
     enriched.additions = d.additions ?? 0;
     enriched.deletions = d.deletions ?? 0;
     enriched.changedFiles = d.changed_files ?? 0;
@@ -946,6 +952,60 @@ export async function closePR(
     const text = await res.text();
     throw new Error(`GitHub API ${res.status}: ${text}`);
   }
+}
+
+export async function requestReviewers(
+  token: string,
+  repo: string,
+  number: number,
+  reviewers: string[]
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/pulls/${number}/requested_reviewers`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ reviewers }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function removeReviewRequest(
+  token: string,
+  repo: string,
+  number: number,
+  reviewers: string[]
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/pulls/${number}/requested_reviewers`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ reviewers }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function fetchCollaborators(
+  token: string,
+  repo: string
+): Promise<Array<{ login: string; avatar_url: string }>> {
+  return ghFetch<Array<{ login: string; avatar_url: string }>>(
+    token,
+    `/repos/${repo}/collaborators?per_page=100`
+  );
 }
 
 export async function mergePR(
