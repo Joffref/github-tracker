@@ -41,7 +41,10 @@ export function categorizePR(
   return "other";
 }
 
-export const REFRESH_INTERVAL_MS = 120_000;
+export const REFRESH_INTERVAL_MS = 30_000;
+export const SIDEPANEL_REFRESH_INTERVAL_MS = 45_000;
+export const STALE_THRESHOLD_MS = 60_000;
+export const ACTIVITY_REFRESH_INTERVAL_MS = 120_000;
 
 export function timeAgo(date: string): string {
   const seconds = Math.floor(
