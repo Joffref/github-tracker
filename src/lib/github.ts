@@ -1144,6 +1144,213 @@ export async function pollForToken(
   }
 }
 
+// ── Analytics ──────────────────────────────────────────────────────
+
+export interface WeeklyStats {
+  weekStart: string; // ISO date (Monday)
+  prsOpened: number;
+  prsMerged: number;
+  reviewsGiven: number;
+  commentsGiven: number;
+}
+
+export interface PRCycleTime {
+  repo: string;
+  prNumber: number;
+  prTitle: string;
+  url: string;
+  createdAt: string;
+  mergedAt: string;
+  cycleHours: number;
+  additions: number;
+  deletions: number;
+}
+
+export interface RepoActivity {
+  repo: string;
+  prsAuthored: number;
+  reviewsGiven: number;
+  commentsGiven: number;
+}
+
+export interface AnalyticsData {
+  weeklyStats: WeeklyStats[];
+  prCycleTimes: PRCycleTime[];
+  repoActivity: RepoActivity[];
+  reviewBreakdown: { approved: number; changesRequested: number; commented: number };
+  totals: { prsOpened: number; prsMerged: number; reviewsGiven: number; commentsGiven: number };
+}
+
+function getMonday(d: Date): Date {
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(d);
+  monday.setDate(diff);
+  monday.setHours(0, 0, 0, 0);
+  return monday;
+}
+
+function formatDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+export async function fetchAnalytics(
+  token: string,
+  username: string,
+  weeks: number = 12,
+  org?: string | null
+): Promise<AnalyticsData> {
+  const now = new Date();
+  const sinceDate = new Date(now);
+  sinceDate.setDate(sinceDate.getDate() - weeks * 7);
+  const since = formatDate(sinceDate);
+  const orgFilter = org ? ` org:${org}` : "";
+
+  const [openedData, mergedData, reviewedData, commentedData] = await Promise.all([
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr author:${username} created:>=${since}${orgFilter}`)}&per_page=100&sort=created`
+    ),
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr author:${username} is:merged merged:>=${since}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr reviewed-by:${username} -author:${username} updated:>=${since}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+    ghFetch<SearchResult>(
+      token,
+      `/search/issues?q=${encodeURIComponent(`type:pr commenter:${username} -author:${username} updated:>=${since}${orgFilter}`)}&per_page=100&sort=updated`
+    ),
+  ]);
+
+  // Build week buckets
+  const weekMap = new Map<string, WeeklyStats>();
+  for (let i = 0; i < weeks; i++) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i * 7);
+    const monday = getMonday(d);
+    const key = formatDate(monday);
+    if (!weekMap.has(key)) {
+      weekMap.set(key, { weekStart: key, prsOpened: 0, prsMerged: 0, reviewsGiven: 0, commentsGiven: 0 });
+    }
+  }
+
+  const getWeekKey = (dateStr: string) => formatDate(getMonday(new Date(dateStr)));
+
+  for (const item of openedData.items) {
+    const key = getWeekKey(item.created_at as string);
+    const w = weekMap.get(key);
+    if (w) w.prsOpened++;
+  }
+
+  // Fetch merged PR details for cycle times
+  const mergedItems = mergedData.items.map((item) => ({
+    repo: extractRepo(item.repository_url as string),
+    prNumber: item.number as number,
+    prTitle: item.title as string,
+    url: item.html_url as string,
+    createdAt: item.created_at as string,
+  }));
+
+  const prDetails = await Promise.allSettled(
+    mergedItems.slice(0, 50).map(async (item) => {
+      const pr = await ghFetch<{
+        merged_at: string | null;
+        merged_by: { login: string } | null;
+        additions: number;
+        deletions: number;
+      }>(token, `/repos/${item.repo}/pulls/${item.prNumber}`);
+      return { ...item, mergedAt: pr.merged_at, mergedBy: pr.merged_by?.login, additions: pr.additions, deletions: pr.deletions };
+    })
+  );
+
+  const cycleTimes: PRCycleTime[] = [];
+  for (const result of prDetails) {
+    if (result.status !== "fulfilled" || !result.value.mergedAt) continue;
+    const d = result.value;
+    const mergedAt = d.mergedAt!;
+    const key = getWeekKey(mergedAt);
+    const w = weekMap.get(key);
+    if (w) w.prsMerged++;
+    cycleTimes.push({
+      repo: d.repo,
+      prNumber: d.prNumber,
+      prTitle: d.prTitle,
+      url: d.url,
+      createdAt: d.createdAt,
+      mergedAt: mergedAt,
+      cycleHours: (new Date(mergedAt).getTime() - new Date(d.createdAt).getTime()) / (1000 * 60 * 60),
+      additions: d.additions,
+      deletions: d.deletions,
+    });
+  }
+
+  for (const item of reviewedData.items) {
+    const key = getWeekKey(item.updated_at as string);
+    const w = weekMap.get(key);
+    if (w) w.reviewsGiven++;
+  }
+
+  for (const item of commentedData.items) {
+    const key = getWeekKey(item.updated_at as string);
+    const w = weekMap.get(key);
+    if (w) w.commentsGiven++;
+  }
+
+  // Repo activity
+  const repoMap = new Map<string, RepoActivity>();
+  const getRepo = (item: Record<string, unknown>) => extractRepo(item.repository_url as string);
+  const ensureRepo = (repo: string) => {
+    if (!repoMap.has(repo)) repoMap.set(repo, { repo, prsAuthored: 0, reviewsGiven: 0, commentsGiven: 0 });
+    return repoMap.get(repo)!;
+  };
+
+  for (const item of openedData.items) ensureRepo(getRepo(item)).prsAuthored++;
+  for (const item of reviewedData.items) ensureRepo(getRepo(item)).reviewsGiven++;
+  for (const item of commentedData.items) ensureRepo(getRepo(item)).commentsGiven++;
+
+  // Review breakdown (fetch actual review events for a sample)
+  const reviewBreakdown = { approved: 0, changesRequested: 0, commented: 0 };
+  const reviewSampleRepos = [...new Set(reviewedData.items.map(getRepo))].slice(0, 10);
+  const reviewCounts = await Promise.allSettled(
+    reviewedData.items.slice(0, 30).map(async (item) => {
+      const repo = getRepo(item);
+      const reviews = await ghFetch<Array<{ user: { login: string }; state: string }>>(
+        token,
+        `/repos/${repo}/pulls/${(item.number as number)}/reviews`
+      );
+      return reviews.filter((r) => r.user.login.toLowerCase() === username.toLowerCase());
+    })
+  );
+  for (const result of reviewCounts) {
+    if (result.status !== "fulfilled") continue;
+    for (const review of result.value) {
+      if (review.state === "APPROVED") reviewBreakdown.approved++;
+      else if (review.state === "CHANGES_REQUESTED") reviewBreakdown.changesRequested++;
+      else if (review.state === "COMMENTED") reviewBreakdown.commented++;
+    }
+  }
+
+  const weeklyStats = Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+
+  return {
+    weeklyStats,
+    prCycleTimes: cycleTimes.sort((a, b) => new Date(b.mergedAt).getTime() - new Date(a.mergedAt).getTime()),
+    repoActivity: Array.from(repoMap.values()).sort((a, b) =>
+      (b.prsAuthored + b.reviewsGiven + b.commentsGiven) - (a.prsAuthored + a.reviewsGiven + a.commentsGiven)
+    ),
+    reviewBreakdown,
+    totals: {
+      prsOpened: openedData.items.length,
+      prsMerged: cycleTimes.length,
+      reviewsGiven: reviewedData.items.length,
+      commentsGiven: commentedData.items.length,
+    },
+  };
+}
+
 // ── Batch enrichment ───────────────────────────────────────────────
 
 export async function enrichAllPRs(

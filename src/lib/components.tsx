@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
-import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution } from "./github";
-import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, requestReviewers, removeReviewRequest, fetchCollaborators, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
+import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution, AnalyticsData } from "./github";
+import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchAnalytics, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, requestReviewers, removeReviewRequest, fetchCollaborators, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -3507,6 +3507,379 @@ function EmptyState({ hasFilters }: { hasFilters: boolean }) {
   );
 }
 
+// ── Analytics Icons ─────────────────────────────────────────────────
+
+function BarChartIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path d="M18 20V10M12 20V4M6 20v-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ArrowLeftIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path d="M19 12H5m0 0l7 7m-7-7l7-7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TrendUpIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points="17 6 23 6 23 12" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+// ── Analytics Page ─────────────────────────────────────────────────
+
+function AnalyticsPage({ token, username, org, onBack }: {
+  token: string;
+  username: string;
+  org: string | null;
+  onBack: () => void;
+}) {
+  const [data, setData] = useState<AnalyticsData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [weeks, setWeeks] = useState(12);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetchAnalytics(token, username, weeks, org)
+      .then((d) => { if (!cancelled) { setData(d); setLoading(false); } })
+      .catch((e) => { if (!cancelled) { setError(e.message); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [token, username, weeks, org]);
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-5xl mx-auto space-y-6">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeftIcon /></Button>
+            <h2 className="text-lg font-semibold">Analytics</h2>
+          </div>
+          <div className="grid grid-cols-4 gap-4">
+            {[1, 2, 3, 4].map((i) => <div key={i} className="h-24 skeleton-shimmer rounded-xl" />)}
+          </div>
+          <div className="h-64 skeleton-shimmer rounded-xl" />
+          <div className="grid grid-cols-2 gap-4">
+            <div className="h-48 skeleton-shimmer rounded-xl" />
+            <div className="h-48 skeleton-shimmer rounded-xl" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-5xl mx-auto">
+          <div className="flex items-center gap-3 mb-4">
+            <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeftIcon /></Button>
+            <h2 className="text-lg font-semibold">Analytics</h2>
+          </div>
+          <div className="px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">{error}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  const avgCycleHours = data.prCycleTimes.length > 0
+    ? data.prCycleTimes.reduce((s, p) => s + p.cycleHours, 0) / data.prCycleTimes.length
+    : 0;
+
+  const formatCycleTime = (hours: number) => {
+    if (hours < 1) return `${Math.round(hours * 60)}m`;
+    if (hours < 24) return `${Math.round(hours)}h`;
+    return `${(hours / 24).toFixed(1)}d`;
+  };
+
+  const maxWeeklyTotal = Math.max(
+    1,
+    ...data.weeklyStats.map((w) => w.prsOpened + w.prsMerged + w.reviewsGiven + w.commentsGiven)
+  );
+
+  const totalReviews = data.reviewBreakdown.approved + data.reviewBreakdown.changesRequested + data.reviewBreakdown.commented;
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 animate-fade-in-down">
+      <div className="max-w-5xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeftIcon /></Button>
+            <h2 className="text-lg font-semibold">Performance Analytics</h2>
+          </div>
+          <select
+            value={weeks}
+            onChange={(e) => setWeeks(Number(e.target.value))}
+            className="h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground cursor-pointer"
+          >
+            <option value={4}>Last 4 weeks</option>
+            <option value={8}>Last 8 weeks</option>
+            <option value={12}>Last 12 weeks</option>
+          </select>
+        </div>
+
+        {/* Summary cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <StatCard label="PRs Opened" value={data.totals.prsOpened} color="text-blue-500" bg="bg-blue-500/10" />
+          <StatCard label="PRs Merged" value={data.totals.prsMerged} color="text-green-500" bg="bg-green-500/10" />
+          <StatCard label="Reviews Given" value={data.totals.reviewsGiven} color="text-purple-500" bg="bg-purple-500/10" />
+          <StatCard label="Avg Cycle Time" value={formatCycleTime(avgCycleHours)} color="text-amber-500" bg="bg-amber-500/10" />
+        </div>
+
+        {/* Weekly activity chart */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Weekly Activity</CardTitle>
+            <CardDescription className="text-xs">Contributions per week over the last {weeks} weeks</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-end gap-1 h-40">
+              {data.weeklyStats.map((w) => {
+                const total = w.prsOpened + w.prsMerged + w.reviewsGiven + w.commentsGiven;
+                const pct = (total / maxWeeklyTotal) * 100;
+                const d = new Date(w.weekStart);
+                const label = `${d.getMonth() + 1}/${d.getDate()}`;
+                return (
+                  <Tooltip key={w.weekStart}>
+                    <TooltipTrigger
+                      render={
+                        <div className="flex-1 flex flex-col items-center gap-1 cursor-default">
+                          <div className="w-full flex flex-col items-stretch" style={{ height: "120px" }}>
+                            <div className="flex-1" />
+                            <div className="flex flex-col rounded-t-sm overflow-hidden" style={{ height: `${Math.max(pct, 2)}%` }}>
+                              {w.commentsGiven > 0 && <div className="bg-amber-500/70 flex-1" style={{ flex: w.commentsGiven }} />}
+                              {w.reviewsGiven > 0 && <div className="bg-purple-500/70 flex-1" style={{ flex: w.reviewsGiven }} />}
+                              {w.prsMerged > 0 && <div className="bg-green-500/70 flex-1" style={{ flex: w.prsMerged }} />}
+                              {w.prsOpened > 0 && <div className="bg-blue-500/70 flex-1" style={{ flex: w.prsOpened }} />}
+                            </div>
+                          </div>
+                          <span className="text-[9px] text-muted-foreground">{label}</span>
+                        </div>
+                      }
+                    />
+                    <TooltipContent>
+                      <div className="text-xs space-y-0.5">
+                        <div className="font-medium">Week of {w.weekStart}</div>
+                        <div className="text-blue-400">{w.prsOpened} PRs opened</div>
+                        <div className="text-green-400">{w.prsMerged} PRs merged</div>
+                        <div className="text-purple-400">{w.reviewsGiven} reviews</div>
+                        <div className="text-amber-400">{w.commentsGiven} comments</div>
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border">
+              <LegendDot color="bg-blue-500" label="PRs Opened" />
+              <LegendDot color="bg-green-500" label="PRs Merged" />
+              <LegendDot color="bg-purple-500" label="Reviews" />
+              <LegendDot color="bg-amber-500" label="Comments" />
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Review breakdown */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">Review Breakdown</CardTitle>
+              <CardDescription className="text-xs">{totalReviews} reviews sampled</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {totalReviews === 0 ? (
+                <p className="text-xs text-muted-foreground py-4 text-center">No reviews in this period</p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex rounded-full overflow-hidden h-3">
+                    {data.reviewBreakdown.approved > 0 && (
+                      <div className="bg-green-500" style={{ width: `${(data.reviewBreakdown.approved / totalReviews) * 100}%` }} />
+                    )}
+                    {data.reviewBreakdown.changesRequested > 0 && (
+                      <div className="bg-red-500" style={{ width: `${(data.reviewBreakdown.changesRequested / totalReviews) * 100}%` }} />
+                    )}
+                    {data.reviewBreakdown.commented > 0 && (
+                      <div className="bg-amber-500" style={{ width: `${(data.reviewBreakdown.commented / totalReviews) * 100}%` }} />
+                    )}
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <LegendDot color="bg-green-500" label={`Approved (${data.reviewBreakdown.approved})`} />
+                    <LegendDot color="bg-red-500" label={`Changes (${data.reviewBreakdown.changesRequested})`} />
+                    <LegendDot color="bg-amber-500" label={`Commented (${data.reviewBreakdown.commented})`} />
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* PR Cycle Times */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-medium">PR Cycle Time</CardTitle>
+              <CardDescription className="text-xs">Time from open to merge ({data.prCycleTimes.length} PRs)</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {data.prCycleTimes.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-4 text-center">No merged PRs in this period</p>
+              ) : (
+                <div className="space-y-2">
+                  {(() => {
+                    const sorted = [...data.prCycleTimes].sort((a, b) => a.cycleHours - b.cycleHours);
+                    const median = sorted[Math.floor(sorted.length / 2)];
+                    const fastest = sorted[0];
+                    const slowest = sorted[sorted.length - 1];
+                    return (
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <div className="rounded-lg bg-green-500/10 p-2">
+                          <div className="text-lg font-semibold text-green-500">{formatCycleTime(fastest.cycleHours)}</div>
+                          <div className="text-[10px] text-muted-foreground">Fastest</div>
+                        </div>
+                        <div className="rounded-lg bg-blue-500/10 p-2">
+                          <div className="text-lg font-semibold text-blue-500">{formatCycleTime(median.cycleHours)}</div>
+                          <div className="text-[10px] text-muted-foreground">Median</div>
+                        </div>
+                        <div className="rounded-lg bg-amber-500/10 p-2">
+                          <div className="text-lg font-semibold text-amber-500">{formatCycleTime(slowest.cycleHours)}</div>
+                          <div className="text-[10px] text-muted-foreground">Slowest</div>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                  <ScrollArea className="h-28">
+                    <div className="space-y-1">
+                      {data.prCycleTimes.slice(0, 20).map((pr) => {
+                        const maxHours = Math.max(...data.prCycleTimes.map((p) => p.cycleHours));
+                        const pct = (pr.cycleHours / maxHours) * 100;
+                        return (
+                          <a key={`${pr.repo}#${pr.prNumber}`} href={pr.url} target="_blank" rel="noopener noreferrer"
+                            className="flex items-center gap-2 text-xs py-1 px-2 rounded hover:bg-muted transition-colors group">
+                            <div className="flex-1 min-w-0 truncate text-foreground group-hover:text-foreground">
+                              {pr.prTitle}
+                            </div>
+                            <div className="shrink-0 w-24 h-1.5 rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={cn("h-full rounded-full", pr.cycleHours < 24 ? "bg-green-500" : pr.cycleHours < 72 ? "bg-amber-500" : "bg-red-500")}
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="shrink-0 text-muted-foreground w-10 text-right">{formatCycleTime(pr.cycleHours)}</span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </ScrollArea>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Top repos */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Repository Activity</CardTitle>
+            <CardDescription className="text-xs">Your most active repositories</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {data.repoActivity.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-4 text-center">No activity in this period</p>
+            ) : (
+              <div className="space-y-2">
+                {data.repoActivity.slice(0, 10).map((repo) => {
+                  const total = repo.prsAuthored + repo.reviewsGiven + repo.commentsGiven;
+                  const maxTotal = Math.max(...data.repoActivity.map((r) => r.prsAuthored + r.reviewsGiven + r.commentsGiven));
+                  const pct = (total / maxTotal) * 100;
+                  return (
+                    <div key={repo.repo} className="flex items-center gap-3">
+                      <span className="text-xs text-foreground w-48 shrink-0 truncate font-mono">{repo.repo}</span>
+                      <div className="flex-1 h-5 rounded-full overflow-hidden flex bg-muted">
+                        {repo.prsAuthored > 0 && (
+                          <div className="bg-blue-500/70 h-full" style={{ width: `${(repo.prsAuthored / total) * pct}%` }} />
+                        )}
+                        {repo.reviewsGiven > 0 && (
+                          <div className="bg-purple-500/70 h-full" style={{ width: `${(repo.reviewsGiven / total) * pct}%` }} />
+                        )}
+                        {repo.commentsGiven > 0 && (
+                          <div className="bg-amber-500/70 h-full" style={{ width: `${(repo.commentsGiven / total) * pct}%` }} />
+                        )}
+                      </div>
+                      <span className="text-xs text-muted-foreground w-8 text-right shrink-0">{total}</span>
+                    </div>
+                  );
+                })}
+                <div className="flex items-center gap-4 mt-2 pt-2 border-t border-border">
+                  <LegendDot color="bg-blue-500" label="PRs" />
+                  <LegendDot color="bg-purple-500" label="Reviews" />
+                  <LegendDot color="bg-amber-500" label="Comments" />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Recent merged PRs with code volume */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Recently Merged PRs</CardTitle>
+            <CardDescription className="text-xs">Your latest merged pull requests with code volume</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {data.prCycleTimes.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-4 text-center">No merged PRs in this period</p>
+            ) : (
+              <div className="space-y-1">
+                {data.prCycleTimes.slice(0, 15).map((pr) => (
+                  <a key={`${pr.repo}#${pr.prNumber}`} href={pr.url} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-3 text-xs py-1.5 px-2 rounded hover:bg-muted transition-colors">
+                    <span className="flex-1 min-w-0 truncate text-foreground">{pr.prTitle}</span>
+                    <span className="text-muted-foreground shrink-0">{pr.repo.split("/")[1]}#{pr.prNumber}</span>
+                    <span className="text-green-500 shrink-0 font-mono">+{pr.additions}</span>
+                    <span className="text-red-500 shrink-0 font-mono">-{pr.deletions}</span>
+                    <span className="text-muted-foreground shrink-0 w-12 text-right">{formatCycleTime(pr.cycleHours)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, color, bg }: { label: string; value: string | number; color: string; bg: string }) {
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="p-4">
+        <div className={cn("text-2xl font-bold", color)}>{value}</div>
+        <div className="text-xs text-muted-foreground mt-1">{label}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className={cn("w-2 h-2 rounded-full", color)} />
+      <span className="text-[10px] text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
 // ── Dashboard ──────────────────────────────────────────────────────
 
 interface DashboardProps {
@@ -3760,6 +4133,7 @@ function useDeferredValue<T>(value: T, delay: number): { current: T; isOpen: boo
 export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardProps) {
   const [org, setOrg] = useLocalStorage<string | null>("gh-dashboard-org", null);
   const [orgs, setOrgs] = useState<Array<{ login: string; avatar_url: string }>>([]);
+  const [view, setView] = useState<"dashboard" | "analytics">("dashboard");
   const { prs, user, loading, enriching, error, refresh, lastRefreshed, updatePR } = usePRs(token, org);
 
   // Fetch user orgs on mount
@@ -3969,8 +4343,11 @@ export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardPro
           onOrgChange={setOrg}
         />
 
-        {user && <ActivityTracker token={token} username={user.login} org={org} />}
+        {view === "dashboard" && user && <ActivityTracker token={token} username={user.login} org={org} />}
 
+        {view === "analytics" && user ? (
+          <AnalyticsPage token={token} username={user.login} org={org} onBack={() => setView("dashboard")} />
+        ) : (
         <div className="flex-1 flex overflow-hidden">
           {/* Left: PR list */}
           <div
@@ -4030,6 +4407,16 @@ export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardPro
                     <BellIcon />
                   </TooltipTrigger>
                   <TooltipContent>{notificationsEnabled ? "Notifications on" : "Enable notifications"}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button variant="ghost" size="icon-xs" onClick={() => setView("analytics")} />
+                    }
+                  >
+                    <BarChartIcon />
+                  </TooltipTrigger>
+                  <TooltipContent>Analytics</TooltipContent>
                 </Tooltip>
                 <Tooltip>
                   <TooltipTrigger
@@ -4100,6 +4487,7 @@ export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardPro
             </div>
           )}
         </div>
+        )}
       </div>
     </TooltipProvider>
   );
