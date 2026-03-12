@@ -1814,7 +1814,7 @@ function FileTreeView({
           </div>
 
           {/* Tree body */}
-          <div className="py-1 max-h-[300px] overflow-y-auto">
+          <div className="py-1 max-h-[60vh] overflow-y-auto">
             {tree.map((node) => (
               <TreeNodeRow
                 key={node.path}
@@ -1847,6 +1847,7 @@ function ChangesTabContent({
   onCommentPosted: (c: ReviewComment) => void;
 }) {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [seenFiles, setSeenFiles] = useState<Set<string>>(new Set());
   const diffRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const handleSelectFile = useCallback((filename: string) => {
@@ -1857,33 +1858,46 @@ function ChangesTabContent({
     }
   }, []);
 
+  const toggleSeen = useCallback((filename: string) => {
+    setSeenFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(filename)) next.delete(filename);
+      else next.add(filename);
+      return next;
+    });
+  }, []);
+
   if (files.length === 0) {
     return <p className="text-xs text-muted-foreground italic">No files changed</p>;
   }
 
   return (
-    <div className="space-y-0">
-      <FileTreeView
-        files={files}
-        reviewComments={reviewComments}
-        selectedFile={selectedFile}
-        onSelectFile={handleSelectFile}
-      />
-      {files.map((f) => (
-        <div key={f.filename} ref={(el) => { if (el) diffRefs.current.set(f.filename, el); }}>
-          <DiffView
-            file={f}
-            reviewComments={reviewComments}
-            token={token}
-            repo={pr.repo}
-            prNumber={pr.number}
-            commitId={pr.headSha}
-            onCommentPosted={onCommentPosted}
-            isSeen={false}
-            onToggleSeen={() => {}}
-          />
-        </div>
-      ))}
+    <div className="flex gap-4 items-start">
+      <div className="sticky top-0 shrink-0 w-[260px]">
+        <FileTreeView
+          files={files}
+          reviewComments={reviewComments}
+          selectedFile={selectedFile}
+          onSelectFile={handleSelectFile}
+        />
+      </div>
+      <div className="flex-1 min-w-0 space-y-0">
+        {files.map((f) => (
+          <div key={f.filename} ref={(el) => { if (el) diffRefs.current.set(f.filename, el); }}>
+            <DiffView
+              file={f}
+              reviewComments={reviewComments}
+              token={token}
+              repo={pr.repo}
+              prNumber={pr.number}
+              commitId={pr.headSha}
+              onCommentPosted={onCommentPosted}
+              isSeen={seenFiles.has(f.filename)}
+              onToggleSeen={() => toggleSeen(f.filename)}
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
