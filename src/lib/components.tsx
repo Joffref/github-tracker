@@ -1517,6 +1517,377 @@ function highlightDiffLines(lines: Array<{ content: string; type: string }>, lan
   });
 }
 
+// ── File Tree View (GitLab-inspired) ──────────────────────────────
+
+type TreeNode = {
+  name: string;
+  path: string;
+  type: "folder" | "file";
+  file?: PRFile;
+  children: TreeNode[];
+  additions: number;
+  deletions: number;
+  commentCount: number;
+};
+
+function buildFileTree(files: PRFile[], reviewComments: ReviewComment[]): TreeNode[] {
+  const root: TreeNode[] = [];
+  const commentsByFile = new Map<string, number>();
+  for (const c of reviewComments) {
+    if (c.path) commentsByFile.set(c.path, (commentsByFile.get(c.path) ?? 0) + 1);
+  }
+
+  for (const f of files) {
+    const parts = f.filename.split("/");
+    let current = root;
+    let pathSoFar = "";
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
+      const isFile = i === parts.length - 1;
+
+      let node = current.find((n) => n.name === part && n.type === (isFile ? "file" : "folder"));
+      if (!node) {
+        node = {
+          name: part,
+          path: pathSoFar,
+          type: isFile ? "file" : "folder",
+          file: isFile ? f : undefined,
+          children: [],
+          additions: isFile ? f.additions : 0,
+          deletions: isFile ? f.deletions : 0,
+          commentCount: isFile ? (commentsByFile.get(f.filename) ?? 0) : 0,
+        };
+        current.push(node);
+      }
+      if (!isFile) {
+        node.additions += f.additions;
+        node.deletions += f.deletions;
+        node.commentCount += commentsByFile.get(f.filename) ?? 0;
+        current = node.children;
+      }
+    }
+  }
+
+  // Collapse single-child folders (like GitLab does)
+  function collapse(nodes: TreeNode[]): TreeNode[] {
+    return nodes.map((node) => {
+      if (node.type === "folder") {
+        node.children = collapse(node.children);
+        if (node.children.length === 1 && node.children[0].type === "folder") {
+          const child = node.children[0];
+          return { ...child, name: `${node.name}/${child.name}`, children: collapse(child.children) };
+        }
+      }
+      return node;
+    });
+  }
+
+  // Sort: folders first, then alphabetically
+  function sortNodes(nodes: TreeNode[]): TreeNode[] {
+    return nodes.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    }).map((n) => ({ ...n, children: n.type === "folder" ? sortNodes(n.children) : n.children }));
+  }
+
+  return sortNodes(collapse(root));
+}
+
+function FolderIcon({ open }: { open: boolean }) {
+  return open ? (
+    <svg className="w-4 h-4 text-amber-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v1H2V6z" />
+      <path fillRule="evenodd" d="M2 9h16l-1.5 6H3.5L2 9z" clipRule="evenodd" />
+    </svg>
+  ) : (
+    <svg className="w-4 h-4 text-amber-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+    </svg>
+  );
+}
+
+function FileIcon({ status }: { status: string }) {
+  const color = status === "added" ? "text-emerald-500" : status === "removed" ? "text-red-500" : "text-muted-foreground";
+  return (
+    <svg className={`w-4 h-4 shrink-0 ${color}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M14 2v6h6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function FileStatusBadge({ status }: { status: string }) {
+  const config = {
+    added: { label: "A", bg: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+    removed: { label: "D", bg: "bg-red-500/15 text-red-600 dark:text-red-400" },
+    renamed: { label: "R", bg: "bg-blue-500/15 text-blue-600 dark:text-blue-400" },
+    modified: { label: "M", bg: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  }[status] ?? { label: "M", bg: "bg-amber-500/15 text-amber-600 dark:text-amber-400" };
+
+  return (
+    <span className={`text-[9px] font-bold px-1 py-0 rounded ${config.bg} shrink-0`}>
+      {config.label}
+    </span>
+  );
+}
+
+function TreeNodeRow({
+  node,
+  depth,
+  expandedFolders,
+  toggleFolder,
+  selectedFile,
+  onSelectFile,
+}: {
+  node: TreeNode;
+  depth: number;
+  expandedFolders: Set<string>;
+  toggleFolder: (path: string) => void;
+  selectedFile: string | null;
+  onSelectFile: (filename: string) => void;
+}) {
+  const isFolder = node.type === "folder";
+  const isExpanded = expandedFolders.has(node.path);
+  const isSelected = !isFolder && selectedFile === node.file?.filename;
+
+  return (
+    <>
+      <button
+        onClick={() => isFolder ? toggleFolder(node.path) : node.file && onSelectFile(node.file.filename)}
+        className={cn(
+          "w-full flex items-center gap-1.5 py-[3px] pr-2 text-left transition-colors rounded-sm group",
+          isSelected
+            ? "bg-primary/10 text-primary"
+            : "hover:bg-muted/80 text-foreground",
+        )}
+        style={{ paddingLeft: `${depth * 16 + 6}px` }}
+      >
+        {isFolder ? (
+          <>
+            <ChevronIcon open={isExpanded} />
+            <FolderIcon open={isExpanded} />
+          </>
+        ) : (
+          <>
+            <span className="w-4" /> {/* Spacer to align with folder chevrons */}
+            <FileIcon status={node.file?.status ?? "modified"} />
+          </>
+        )}
+
+        <span className={cn(
+          "text-[12px] font-mono truncate flex-1",
+          isFolder && "font-medium",
+        )}>
+          {node.name}
+        </span>
+
+        {node.commentCount > 0 && (
+          <span className="text-[9px] font-medium bg-primary/15 text-primary px-1 rounded-full shrink-0">
+            {node.commentCount}
+          </span>
+        )}
+
+        {!isFolder && node.file && (
+          <>
+            <FileStatusBadge status={node.file.status} />
+            <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums">
+              <span className="text-emerald-500">+{node.additions}</span>
+              {" "}
+              <span className="text-red-500">-{node.deletions}</span>
+            </span>
+          </>
+        )}
+      </button>
+
+      {isFolder && isExpanded && node.children.map((child) => (
+        <TreeNodeRow
+          key={child.path}
+          node={child}
+          depth={depth + 1}
+          expandedFolders={expandedFolders}
+          toggleFolder={toggleFolder}
+          selectedFile={selectedFile}
+          onSelectFile={onSelectFile}
+        />
+      ))}
+    </>
+  );
+}
+
+function FileTreeView({
+  files,
+  reviewComments,
+  selectedFile,
+  onSelectFile,
+}: {
+  files: PRFile[];
+  reviewComments: ReviewComment[];
+  selectedFile: string | null;
+  onSelectFile: (filename: string) => void;
+}) {
+  const tree = useMemo(() => buildFileTree(files, reviewComments), [files, reviewComments]);
+
+  // Start with all folders expanded
+  const allFolderPaths = useMemo(() => {
+    const paths = new Set<string>();
+    function collect(nodes: TreeNode[]) {
+      for (const n of nodes) {
+        if (n.type === "folder") {
+          paths.add(n.path);
+          collect(n.children);
+        }
+      }
+    }
+    collect(tree);
+    return paths;
+  }, [tree]);
+
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(allFolderPaths);
+  const [isTreeCollapsed, setIsTreeCollapsed] = useState(false);
+
+  // Update expanded folders when tree changes (new files appear)
+  useEffect(() => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      for (const p of allFolderPaths) next.add(p);
+      return next;
+    });
+  }, [allFolderPaths]);
+
+  const toggleFolder = useCallback((path: string) => {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const collapseAll = useCallback(() => setExpandedFolders(new Set()), []);
+  const expandAll = useCallback(() => setExpandedFolders(new Set(allFolderPaths)), [allFolderPaths]);
+
+  const totalAdditions = files.reduce((s, f) => s + f.additions, 0);
+  const totalDeletions = files.reduce((s, f) => s + f.deletions, 0);
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden mb-4">
+      {/* Tree header */}
+      <button
+        onClick={() => setIsTreeCollapsed(!isTreeCollapsed)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-muted/50 hover:bg-muted/80 transition-colors cursor-pointer"
+      >
+        <ChevronIcon open={!isTreeCollapsed} />
+        <svg className="w-3.5 h-3.5 text-muted-foreground shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className="text-xs font-medium text-foreground">
+          {files.length} {files.length === 1 ? "file" : "files"} changed
+        </span>
+        <span className="text-[10px] text-muted-foreground tabular-nums ml-auto">
+          <span className="text-emerald-500">+{totalAdditions}</span>
+          {" "}
+          <span className="text-red-500">-{totalDeletions}</span>
+        </span>
+      </button>
+
+      {!isTreeCollapsed && (
+        <div className="border-t border-border">
+          {/* Toolbar */}
+          <div className="flex items-center gap-1 px-2 py-1 border-b border-border/50 bg-muted/30">
+            <button
+              onClick={(e) => { e.stopPropagation(); expandAll(); }}
+              className="text-[10px] text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-muted transition-colors cursor-pointer"
+              title="Expand all"
+            >
+              Expand all
+            </button>
+            <span className="text-muted-foreground/30 text-[10px]">|</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); collapseAll(); }}
+              className="text-[10px] text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-muted transition-colors cursor-pointer"
+              title="Collapse all"
+            >
+              Collapse all
+            </button>
+          </div>
+
+          {/* Tree body */}
+          <div className="py-1 max-h-[300px] overflow-y-auto">
+            {tree.map((node) => (
+              <TreeNodeRow
+                key={node.path}
+                node={node}
+                depth={0}
+                expandedFolders={expandedFolders}
+                toggleFolder={toggleFolder}
+                selectedFile={selectedFile}
+                onSelectFile={onSelectFile}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChangesTabContent({
+  files,
+  reviewComments,
+  token,
+  pr,
+  onCommentPosted,
+}: {
+  files: PRFile[];
+  reviewComments: ReviewComment[];
+  token: string;
+  pr: DashboardPR;
+  onCommentPosted: (c: ReviewComment) => void;
+}) {
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const diffRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const handleSelectFile = useCallback((filename: string) => {
+    setSelectedFile(filename);
+    const el = diffRefs.current.get(filename);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, []);
+
+  if (files.length === 0) {
+    return <p className="text-xs text-muted-foreground italic">No files changed</p>;
+  }
+
+  return (
+    <div className="space-y-0">
+      <FileTreeView
+        files={files}
+        reviewComments={reviewComments}
+        selectedFile={selectedFile}
+        onSelectFile={handleSelectFile}
+      />
+      {files.map((f) => (
+        <div key={f.filename} ref={(el) => { if (el) diffRefs.current.set(f.filename, el); }}>
+          <DiffView
+            file={f}
+            reviewComments={reviewComments}
+            token={token}
+            repo={pr.repo}
+            prNumber={pr.number}
+            commitId={pr.headSha}
+            onCommentPosted={onCommentPosted}
+            isSeen={false}
+            onToggleSeen={() => {}}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function DiffView({ file, reviewComments, token, repo, prNumber, commitId, onCommentPosted, isSeen, onToggleSeen }: {
   file: PRFile;
   reviewComments: ReviewComment[];
@@ -2896,23 +3267,13 @@ function SidePanel({ pr, token, onClose, onRefresh, onOptimisticUpdate }: { pr: 
               )}
 
               {tab === "changes" && files && (
-                <div className="space-y-0">
-                  {files.map((f) => (
-                    <DiffView
-                      key={f.filename}
-                      file={f}
-                      reviewComments={reviewComments ?? []}
-                      token={token}
-                      repo={pr.repo}
-                      prNumber={pr.number}
-                      commitId={pr.headSha}
-                      onCommentPosted={handleReviewCommentPosted}
-                      isSeen={false}
-                      onToggleSeen={() => {}}
-                    />
-                  ))}
-                  {files.length === 0 && <p className="text-xs text-muted-foreground italic">No files changed</p>}
-                </div>
+                <ChangesTabContent
+                  files={files}
+                  reviewComments={reviewComments ?? []}
+                  token={token}
+                  pr={pr}
+                  onCommentPosted={handleReviewCommentPosted}
+                />
               )}
 
               {tab === "comments" && (
