@@ -12,7 +12,7 @@ COPY --from=ghcr.io/blaxel-ai/sandbox:latest /sandbox-api /usr/local/bin/sandbox
 
 # Copy project files and install dependencies
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && corepack prepare pnpm@latest --activate && pnpm install --frozen-lockfile
+RUN corepack enable && corepack prepare pnpm@10 --activate && pnpm install --frozen-lockfile
 
 COPY . .
 
