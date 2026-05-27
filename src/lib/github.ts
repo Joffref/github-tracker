@@ -1351,6 +1351,212 @@ export async function fetchAnalytics(
   };
 }
 
+// ── Workflows / Actions ─────────────────────────────────────────────
+
+export interface Workflow {
+  id: number;
+  name: string;
+  path: string;
+  state: string;
+  html_url: string;
+}
+
+export interface WorkflowRun {
+  id: number;
+  name: string | null;
+  status: "queued" | "in_progress" | "completed" | string;
+  conclusion: string | null;
+  html_url: string;
+  head_branch: string;
+  head_sha: string;
+  created_at: string;
+  updated_at: string;
+  run_number: number;
+  event: string;
+}
+
+export interface WorkflowDispatchInput {
+  required: boolean;
+  description?: string;
+  default?: string;
+  type?: string;
+  options?: string[];
+}
+
+export interface WorkflowDispatchConfig {
+  inputs: Record<string, WorkflowDispatchInput>;
+}
+
+export async function fetchWorkflows(
+  token: string,
+  repo: string
+): Promise<Workflow[]> {
+  const data = await ghFetch<{ total_count: number; workflows: Workflow[] }>(
+    token,
+    `/repos/${repo}/actions/workflows?per_page=100`
+  );
+  return data.workflows.filter((w) => w.state === "active");
+}
+
+export async function fetchWorkflowDispatchConfig(
+  token: string,
+  repo: string,
+  workflowPath: string,
+  ref: string
+): Promise<WorkflowDispatchConfig | null> {
+  // Fetch raw YAML to parse `on.workflow_dispatch.inputs`
+  try {
+    const data = await ghFetch<{ content: string; encoding: string }>(
+      token,
+      `/repos/${repo}/contents/${workflowPath}?ref=${encodeURIComponent(ref)}`
+    );
+    const yaml = data.encoding === "base64" ? atob(data.content.replace(/\n/g, "")) : data.content;
+    return parseWorkflowDispatchInputs(yaml);
+  } catch {
+    return null;
+  }
+}
+
+// Minimal YAML parser for the `on.workflow_dispatch.inputs` section only.
+// Handles the common shape used by GitHub Actions workflows.
+function parseWorkflowDispatchInputs(yaml: string): WorkflowDispatchConfig {
+  const lines = yaml.split("\n");
+  const result: WorkflowDispatchConfig = { inputs: {} };
+
+  // Find the `on:` block, then `workflow_dispatch:` inside it, then `inputs:`.
+  let i = 0;
+  const findBlock = (name: string, parentIndent: number, startIdx: number): number => {
+    for (let j = startIdx; j < lines.length; j++) {
+      const line = lines[j];
+      if (!line.trim() || line.trim().startsWith("#")) continue;
+      const indent = line.length - line.trimStart().length;
+      if (indent <= parentIndent && j > startIdx) return -1;
+      if (indent === parentIndent && line.trim().startsWith(name)) return j;
+    }
+    return -1;
+  };
+
+  const onIdx = findBlock("on:", 0, 0);
+  if (onIdx === -1) {
+    // Sometimes written as `on: workflow_dispatch` (single-line)
+    return result;
+  }
+  // workflow_dispatch may appear as a key under `on:` (indented 2) or inline.
+  // We look for `workflow_dispatch:` at indent > 0.
+  let dispatchIdx = -1;
+  for (let j = onIdx + 1; j < lines.length; j++) {
+    const line = lines[j];
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent === 0) break;
+    if (line.trim().startsWith("workflow_dispatch:")) {
+      dispatchIdx = j;
+      break;
+    }
+  }
+  if (dispatchIdx === -1) return result;
+
+  // Find `inputs:` under workflow_dispatch
+  const dispatchIndent = lines[dispatchIdx].length - lines[dispatchIdx].trimStart().length;
+  let inputsIdx = -1;
+  for (let j = dispatchIdx + 1; j < lines.length; j++) {
+    const line = lines[j];
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= dispatchIndent) break;
+    if (line.trim().startsWith("inputs:")) {
+      inputsIdx = j;
+      break;
+    }
+  }
+  if (inputsIdx === -1) return result;
+
+  const inputsIndent = lines[inputsIdx].length - lines[inputsIdx].trimStart().length;
+  let currentInput: string | null = null;
+  let currentIndent = -1;
+  for (i = inputsIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent <= inputsIndent) break;
+    if (currentIndent === -1) currentIndent = indent;
+
+    if (indent === currentIndent) {
+      // New input key
+      const m = line.trim().match(/^([A-Za-z0-9_-]+)\s*:/);
+      if (m) {
+        currentInput = m[1];
+        result.inputs[currentInput] = { required: false };
+      }
+    } else if (currentInput && indent > currentIndent) {
+      // Property of current input
+      const trimmed = line.trim();
+      const m = trimmed.match(/^(required|description|default|type)\s*:\s*(.*)$/);
+      if (m) {
+        const key = m[1];
+        const rawValue = m[2].trim();
+        const value = rawValue.replace(/^["']|["']$/g, "");
+        const input = result.inputs[currentInput];
+        if (key === "required") input.required = value === "true";
+        else if (key === "description") input.description = value;
+        else if (key === "default") input.default = value;
+        else if (key === "type") input.type = value;
+      } else if (trimmed.startsWith("options:")) {
+        // collect options on following lines starting with `-`
+        const opts: string[] = [];
+        for (let k = i + 1; k < lines.length; k++) {
+          const optLine = lines[k];
+          if (!optLine.trim()) continue;
+          const optIndent = optLine.length - optLine.trimStart().length;
+          if (optIndent <= indent) break;
+          const optMatch = optLine.trim().match(/^-\s*(.+)$/);
+          if (optMatch) opts.push(optMatch[1].replace(/^["']|["']$/g, ""));
+        }
+        if (opts.length > 0) result.inputs[currentInput].options = opts;
+      }
+    }
+  }
+
+  return result;
+}
+
+export async function dispatchWorkflow(
+  token: string,
+  repo: string,
+  workflowId: number,
+  ref: string,
+  inputs: Record<string, string> = {}
+): Promise<void> {
+  const res = await fetch(`${BASE}/repos/${repo}/actions/workflows/${workflowId}/dispatches`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ ref, ...(Object.keys(inputs).length > 0 ? { inputs } : {}) }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${text}`);
+  }
+}
+
+export async function fetchLatestWorkflowRun(
+  token: string,
+  repo: string,
+  workflowId: number,
+  branch?: string
+): Promise<WorkflowRun | null> {
+  const branchFilter = branch ? `&branch=${encodeURIComponent(branch)}` : "";
+  const data = await ghFetch<{ total_count: number; workflow_runs: WorkflowRun[] }>(
+    token,
+    `/repos/${repo}/actions/workflows/${workflowId}/runs?per_page=1${branchFilter}`
+  );
+  return data.workflow_runs[0] ?? null;
+}
+
 // ── Batch enrichment ───────────────────────────────────────────────
 
 export async function enrichAllPRs(

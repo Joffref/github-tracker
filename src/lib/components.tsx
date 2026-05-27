@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from "react";
 import type { DashboardPR, CIStatus, ReviewState, PRFile, PRComment, ReviewComment, ConflictFile, CheckRun, WorkflowJob, WorkflowStep, DailyActivity, ThreadResolution, AnalyticsData } from "./github";
-import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchAnalytics, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, requestReviewers, removeReviewRequest, fetchCollaborators, type RepoLabel, type PRCommit, type ReviewThreadInfo } from "./github";
+import { fetchUser, requestDeviceCode, pollForToken, fetchPRFiles, fetchPRCommits, fetchIssueComments, fetchReviewComments, checkOnDevelop, postComment, postReviewComment, postNewReviewComment, fetchConflictFiles, fetchRepoLabels, addLabels, removeLabel, submitReview, mergePR, closePR, fetchCheckRuns, rerunFailedChecks, fetchWorkflowJobs, fetchJobLogs, fetchUserOrgs, fetchDailyActivity, fetchAnalytics, fetchThreadResolutions, resolveReviewThread, unresolveReviewThread, requestReviewers, removeReviewRequest, fetchCollaborators, fetchWorkflows, fetchWorkflowDispatchConfig, dispatchWorkflow, fetchLatestWorkflowRun, type RepoLabel, type PRCommit, type ReviewThreadInfo, type Workflow, type WorkflowRun, type WorkflowDispatchConfig } from "./github";
 import { MarkdownHooks as ReactMarkdown } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -4498,6 +4498,410 @@ function ActivityTracker({ token, username, org }: { token: string; username: st
   );
 }
 
+// ── CI Launcher ─────────────────────────────────────────────────────
+
+interface CIConfig {
+  id: string;
+  label: string;
+  repo: string;
+  workflowId: number;
+  workflowPath: string;
+  workflowName: string;
+  ref: string;
+}
+
+interface CIRunState {
+  loading: boolean;
+  run: WorkflowRun | null;
+  triggering: boolean;
+  error: string | null;
+}
+
+function PlayIcon() {
+  return (
+    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+function PlusIcon() {
+  return (
+    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <line x1="12" y1="5" x2="12" y2="19" strokeLinecap="round" />
+      <line x1="5" y1="12" x2="19" y2="12" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <polyline points="3 6 5 6 21 6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ciRunVisual(run: WorkflowRun | null): { color: string; bg: string; label: string; pulse: boolean } {
+  if (!run) return { color: "text-muted-foreground", bg: "bg-muted", label: "Never run", pulse: false };
+  if (run.status === "queued" || run.status === "in_progress") {
+    return { color: "text-amber-500", bg: "bg-amber-500/10", label: run.status === "queued" ? "Queued" : "Running", pulse: true };
+  }
+  if (run.conclusion === "success") return { color: "text-green-500", bg: "bg-green-500/10", label: "Success", pulse: false };
+  if (run.conclusion === "failure" || run.conclusion === "timed_out") return { color: "text-red-500", bg: "bg-red-500/10", label: "Failed", pulse: false };
+  if (run.conclusion === "cancelled") return { color: "text-muted-foreground", bg: "bg-muted", label: "Cancelled", pulse: false };
+  return { color: "text-muted-foreground", bg: "bg-muted", label: run.conclusion ?? run.status, pulse: false };
+}
+
+function CILauncher({ token }: { token: string }) {
+  const [configs, setConfigs] = useLocalStorage<CIConfig[]>("gh-dashboard-cis", []);
+  const [runs, setRuns] = useState<Record<string, CIRunState>>({});
+  const [adding, setAdding] = useState(false);
+  const [dispatchTarget, setDispatchTarget] = useState<CIConfig | null>(null);
+  const { isVisible } = useDocumentVisibility();
+
+  const loadRun = useCallback(async (cfg: CIConfig) => {
+    setRuns((prev) => ({ ...prev, [cfg.id]: { ...(prev[cfg.id] ?? { run: null, error: null, triggering: false }), loading: true } as CIRunState }));
+    try {
+      const run = await fetchLatestWorkflowRun(token, cfg.repo, cfg.workflowId, cfg.ref);
+      setRuns((prev) => ({ ...prev, [cfg.id]: { loading: false, run, triggering: prev[cfg.id]?.triggering ?? false, error: null } }));
+    } catch (e) {
+      setRuns((prev) => ({ ...prev, [cfg.id]: { loading: false, run: prev[cfg.id]?.run ?? null, triggering: prev[cfg.id]?.triggering ?? false, error: (e as Error).message } }));
+    }
+  }, [token]);
+
+  useEffect(() => {
+    for (const cfg of configs) {
+      if (!(cfg.id in runs)) loadRun(cfg);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configs]);
+
+  useEffect(() => {
+    if (!isVisible || configs.length === 0) return;
+    const id = setInterval(() => {
+      for (const cfg of configs) loadRun(cfg);
+    }, 20_000);
+    return () => clearInterval(id);
+  }, [configs, isVisible, loadRun]);
+
+  const handleAdd = useCallback((cfg: CIConfig) => {
+    setConfigs([...configs, cfg]);
+    setAdding(false);
+  }, [configs, setConfigs]);
+
+  const handleDelete = useCallback((id: string) => {
+    setConfigs(configs.filter((c) => c.id !== id));
+    setRuns((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, [configs, setConfigs]);
+
+  const triggerDispatch = useCallback(async (cfg: CIConfig, inputs: Record<string, string>) => {
+    setRuns((prev) => ({ ...prev, [cfg.id]: { ...(prev[cfg.id] ?? { run: null, loading: false, error: null }), triggering: true, error: null } as CIRunState }));
+    try {
+      await dispatchWorkflow(token, cfg.repo, cfg.workflowId, cfg.ref, inputs);
+      // GitHub doesn't return the run id; poll after a delay
+      setTimeout(() => loadRun(cfg), 2500);
+      setTimeout(() => loadRun(cfg), 6000);
+      setRuns((prev) => ({ ...prev, [cfg.id]: { ...(prev[cfg.id] as CIRunState), triggering: false } }));
+    } catch (e) {
+      setRuns((prev) => ({ ...prev, [cfg.id]: { ...(prev[cfg.id] as CIRunState), triggering: false, error: (e as Error).message } }));
+    }
+  }, [token, loadRun]);
+
+  const handlePlay = useCallback(async (cfg: CIConfig) => {
+    // Check if the workflow requires inputs
+    try {
+      const config = await fetchWorkflowDispatchConfig(token, cfg.repo, cfg.workflowPath, cfg.ref);
+      if (config && Object.keys(config.inputs).length > 0) {
+        setDispatchTarget(cfg);
+        return;
+      }
+    } catch {
+      // ignore — fall through to direct dispatch
+    }
+    triggerDispatch(cfg, {});
+  }, [token, triggerDispatch]);
+
+  return (
+    <div className="border-b border-border">
+      <div className="px-4 py-2 flex items-center gap-2 overflow-x-auto">
+        <span className="text-xs font-medium text-muted-foreground shrink-0">CI</span>
+        {configs.map((cfg) => {
+          const state = runs[cfg.id] ?? { loading: true, run: null, triggering: false, error: null };
+          const v = ciRunVisual(state.run);
+          const runUrl = state.run?.html_url;
+          return (
+            <div
+              key={cfg.id}
+              className={cn(
+                "group inline-flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded-full text-xs border border-border bg-card shrink-0 transition-colors hover:border-foreground/20"
+              )}
+            >
+              <span className={cn("w-1.5 h-1.5 rounded-full", v.color.replace("text-", "bg-"), v.pulse && "animate-pulse")} />
+              <a
+                href={runUrl ?? `https://github.com/${cfg.repo}/actions/workflows/${cfg.workflowPath.split("/").pop()}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-foreground hover:underline"
+                title={`${cfg.repo} · ${cfg.workflowName} · ${cfg.ref}\n${v.label}${state.run ? ` · #${state.run.run_number}` : ""}`}
+              >
+                {cfg.label}
+              </a>
+              <span className={cn("text-[10px]", v.color)}>{v.label}</span>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="h-5 w-5"
+                      disabled={state.triggering}
+                      onClick={() => handlePlay(cfg)}
+                    />
+                  }
+                >
+                  <PlayIcon />
+                </TooltipTrigger>
+                <TooltipContent>Run workflow</TooltipContent>
+              </Tooltip>
+              <button
+                onClick={() => handleDelete(cfg.id)}
+                className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 transition-opacity"
+                title="Remove"
+              >
+                <TrashIcon />
+              </button>
+            </div>
+          );
+        })}
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 px-2 text-[11px] shrink-0"
+          onClick={() => setAdding(true)}
+        >
+          <PlusIcon />
+          {configs.length === 0 ? "Add CI" : ""}
+        </Button>
+      </div>
+      {adding && (
+        <CILauncherAddModal
+          token={token}
+          onClose={() => setAdding(false)}
+          onAdd={handleAdd}
+        />
+      )}
+      {dispatchTarget && (
+        <CILauncherInputsModal
+          token={token}
+          config={dispatchTarget}
+          onClose={() => setDispatchTarget(null)}
+          onSubmit={(inputs) => {
+            triggerDispatch(dispatchTarget, inputs);
+            setDispatchTarget(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CILauncherAddModal({ token, onClose, onAdd }: { token: string; onClose: () => void; onAdd: (cfg: CIConfig) => void }) {
+  const [repo, setRepo] = useState("");
+  const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
+  const [loadingWfs, setLoadingWfs] = useState(false);
+  const [selectedWf, setSelectedWf] = useState<Workflow | null>(null);
+  const [label, setLabel] = useState("");
+  const [ref, setRef] = useState("main");
+  const [error, setError] = useState<string | null>(null);
+
+  const handleLoadWorkflows = useCallback(async () => {
+    if (!repo.trim() || !repo.includes("/")) {
+      setError("Enter repo as owner/repo");
+      return;
+    }
+    setError(null);
+    setLoadingWfs(true);
+    setWorkflows(null);
+    setSelectedWf(null);
+    try {
+      const wfs = await fetchWorkflows(token, repo.trim());
+      setWorkflows(wfs);
+      if (wfs.length === 0) setError("No workflows found in this repo");
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoadingWfs(false);
+    }
+  }, [repo, token]);
+
+  const handleSubmit = useCallback(() => {
+    if (!selectedWf) return;
+    onAdd({
+      id: `${repo}#${selectedWf.id}#${Date.now()}`,
+      label: label.trim() || selectedWf.name,
+      repo: repo.trim(),
+      workflowId: selectedWf.id,
+      workflowPath: selectedWf.path,
+      workflowName: selectedWf.name,
+      ref: ref.trim() || "main",
+    });
+  }, [selectedWf, label, repo, ref, onAdd]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={onClose}>
+      <div className="bg-card border border-border rounded-xl shadow-2xl p-6 max-w-md w-full animate-scale-in" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-foreground">Add CI workflow</h3>
+          <Button variant="ghost" size="icon-xs" onClick={onClose}><XIcon /></Button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1">Repository</label>
+            <div className="flex gap-2">
+              <Input
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                placeholder="owner/repo"
+                onKeyDown={(e) => { if (e.key === "Enter") handleLoadWorkflows(); }}
+              />
+              <Button variant="secondary" size="sm" onClick={handleLoadWorkflows} disabled={loadingWfs || !repo.trim()}>
+                {loadingWfs ? "..." : "Load"}
+              </Button>
+            </div>
+          </div>
+          {workflows && workflows.length > 0 && (
+            <div>
+              <label className="block text-[11px] font-medium text-muted-foreground mb-1">Workflow</label>
+              <select
+                value={selectedWf?.id ?? ""}
+                onChange={(e) => {
+                  const wf = workflows.find((w) => String(w.id) === e.target.value) ?? null;
+                  setSelectedWf(wf);
+                  if (wf && !label) setLabel(wf.name);
+                }}
+                className="w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground"
+              >
+                <option value="">Select…</option>
+                {workflows.map((wf) => (
+                  <option key={wf.id} value={wf.id}>{wf.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1">Branch / ref</label>
+            <Input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="main" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1">Label (optional)</label>
+            <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Shown on the dashboard" />
+          </div>
+          {error && <div className="text-xs text-red-500">{error}</div>}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+            <Button variant="default" size="sm" onClick={handleSubmit} disabled={!selectedWf}>Add</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CILauncherInputsModal({
+  token,
+  config,
+  onClose,
+  onSubmit,
+}: {
+  token: string;
+  config: CIConfig;
+  onClose: () => void;
+  onSubmit: (inputs: Record<string, string>) => void;
+}) {
+  const [dispatchConfig, setDispatchConfig] = useState<WorkflowDispatchConfig | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchWorkflowDispatchConfig(token, config.repo, config.workflowPath, config.ref)
+      .then((c) => {
+        if (cancelled) return;
+        setDispatchConfig(c);
+        const defaults: Record<string, string> = {};
+        if (c) {
+          for (const [k, v] of Object.entries(c.inputs)) {
+            if (v.default !== undefined) defaults[k] = v.default;
+          }
+        }
+        setValues(defaults);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [token, config]);
+
+  const inputs = dispatchConfig ? Object.entries(dispatchConfig.inputs) : [];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in" onClick={onClose}>
+      <div className="bg-card border border-border rounded-xl shadow-2xl p-6 max-w-md w-full animate-scale-in" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-foreground">Run {config.label}</h3>
+          <Button variant="ghost" size="icon-xs" onClick={onClose}><XIcon /></Button>
+        </div>
+        {loading ? (
+          <div className="text-xs text-muted-foreground">Loading inputs…</div>
+        ) : (
+          <div className="space-y-3">
+            {inputs.map(([name, spec]) => (
+              <div key={name}>
+                <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+                  {name}{spec.required && <span className="text-red-500"> *</span>}
+                </label>
+                {spec.options && spec.options.length > 0 ? (
+                  <select
+                    value={values[name] ?? ""}
+                    onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
+                    className="w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground"
+                  >
+                    {spec.options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                ) : spec.type === "boolean" ? (
+                  <select
+                    value={values[name] ?? "false"}
+                    onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
+                    className="w-full h-8 px-2 text-xs rounded-md border border-border bg-background text-foreground"
+                  >
+                    <option value="true">true</option>
+                    <option value="false">false</option>
+                  </select>
+                ) : (
+                  <Input
+                    value={values[name] ?? ""}
+                    onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
+                    placeholder={spec.description ?? ""}
+                  />
+                )}
+                {spec.description && <div className="text-[10px] text-muted-foreground mt-1">{spec.description}</div>}
+              </div>
+            ))}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+              <Button variant="default" size="sm" onClick={() => onSubmit(values)}>Run</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function useDeferredValue<T>(value: T, delay: number): { current: T; isOpen: boolean } {
   const [deferred, setDeferred] = useState(value);
   const [isOpen, setIsOpen] = useState(!!value);
@@ -4733,6 +5137,7 @@ export function Dashboard({ token, onDisconnect, theme, setTheme }: DashboardPro
         />
 
         {view === "dashboard" && user && <ActivityTracker token={token} username={user.login} org={org} />}
+        {view === "dashboard" && user && <CILauncher token={token} />}
 
         {view === "analytics" && user ? (
           <AnalyticsPage token={token} username={user.login} org={org} onBack={() => setView("dashboard")} />
