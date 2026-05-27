@@ -272,6 +272,16 @@ function BellIcon() {
   );
 }
 
+function LightbulbIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path d="M9 18h6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10 22h4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 2a7 7 0 00-4 12.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26A7 7 0 0012 2z" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function KeyboardIcon() {
   return (
     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -667,6 +677,26 @@ function Header({
               <RefreshIcon spinning={loading} rotations={rotations} />
             </TooltipTrigger>
             <TooltipContent>Refresh</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  render={
+                    <a
+                      href="https://github.com/Joffref/github-tracker/issues/new?labels=enhancement&title=%5BFeature+Request%5D+"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                />
+              }
+            >
+              <LightbulbIcon />
+            </TooltipTrigger>
+            <TooltipContent>Request a feature</TooltipContent>
           </Tooltip>
           {user && (
             <div className="flex items-center gap-2">
